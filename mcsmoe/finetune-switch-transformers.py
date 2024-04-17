@@ -245,7 +245,7 @@ def finetune_on_downstream_task(
                 log_dict = {"train_loss": loss.item(),
                             "epoch": completed_steps / num_update_steps_per_epoch,
                             "learning_rate": lr_scheduler.get_lr()}
-                wandb.log(log_dict, step=completed_steps)
+                # wandb.log(log_dict, step=completed_steps)
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
@@ -288,7 +288,7 @@ def finetune_on_downstream_task(
                 if eval_res[metric_key] > best_eval:
                     best_eval = eval_res[metric_key]
                     accelerator.wait_for_everyone()
-                    wandb.summary["best_" + metric_key] = best_eval
+                    # wandb.summary["best_" + metric_key] = best_eval
                     unwrapped_model = accelerator.unwrap_model(model)
                     unwrapped_model.save_pretrained(os.path.join(output_dir, "best"),
                                                     is_main_process=accelerator.is_local_main_process,
@@ -300,7 +300,7 @@ def finetune_on_downstream_task(
                 if accelerator.is_local_main_process:
                     print(f"Step {completed_steps}: eval loss {eval_res['loss']}")
                     eval_res = {("eval_" + k): v for k, v in eval_res.items()}
-                    wandb.log(eval_res, step=completed_steps)
+                    # wandb.log(eval_res, step=completed_steps)
 
                 # model.train()
 
@@ -326,8 +326,8 @@ def finetune_on_downstream_task(
     if accelerator.is_local_main_process:
         tokenizer.save_pretrained(os.path.join(output_dir, "latest"))
 
-    if accelerator.is_local_main_process and wandb is not None:
-        wandb.finish()
+    # if accelerator.is_local_main_process and wandb is not None:
+        # wandb.finish()
 
 
 if __name__ == "__main__":

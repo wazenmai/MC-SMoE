@@ -1,5 +1,5 @@
 torch
-transformers
+transformer==4.39.3
 datasets
 dm-tree
 pytz
