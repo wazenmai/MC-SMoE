@@ -1,5 +1,5 @@
 torch
-transformer==4.39.3
+transformers==4.39.3
 datasets
 dm-tree
 pytz
@@ -12,4 +12,4 @@ deepspeed
 evaluate
 scipy
 scikit-learn
-promptsource
+# promptsource
