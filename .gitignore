@@ -168,3 +168,5 @@ tags
 
 # ruff
 .ruff_cache
+
+mc_env/
