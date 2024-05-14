@@ -170,3 +170,4 @@ tags
 .ruff_cache
 
 mc_env/
+*.png
