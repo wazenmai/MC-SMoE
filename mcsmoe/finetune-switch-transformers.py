@@ -25,6 +25,7 @@ from mcsmoe.data import (
     keep_only_supporting_facts_in_context_for_hotpotqa
 )
 from mcsmoe.utils.training_utils import freeze_switch_routers_for_finetuning
+from mcsmoe.evaluate_zero_shot import evaluate_downstream_zero_shot
 
 logger = get_logger(__name__)
 logger.setLevel(20)
@@ -87,6 +88,7 @@ def finetune_on_downstream_task(
     model = freeze_switch_routers_for_finetuning(model)
 
     tokenizer = T5TokenizerFast.from_pretrained(f"google/switch-base-{num_experts}")
+    # tokenizer = T5TokenizerFast.from_pretrained(checkpoint)
 
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer,
                                            max_length=tokenizer.model_max_length,
@@ -289,13 +291,17 @@ def finetune_on_downstream_task(
                     best_eval = eval_res[metric_key]
                     accelerator.wait_for_everyone()
                     # wandb.summary["best_" + metric_key] = best_eval
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    unwrapped_model.save_pretrained(os.path.join(output_dir, "best"),
-                                                    is_main_process=accelerator.is_local_main_process,
-                                                    save_function=accelerator.save)
                     if accelerator.is_local_main_process:
+                        unwrapped_model = accelerator.unwrap_model(model)
+                        unwrapped_model.save_pretrained(os.path.join(output_dir, "best"),
+                                                        is_main_process=accelerator.is_local_main_process,
+                                                        save_function=accelerator.save)
+                        # model.save_pretrained(os.path.join(output_dir, "best"), safe_serialization=False)
                         tokenizer.save_pretrained(os.path.join(output_dir, "best"))
                         print(f"Best model saved with best evaluation {metric_key}: {eval_res[metric_key]}")
+                        for n, p in model.named_parameters():
+                            print(f"{n}: {p.shape} {p[:5]}")
+                        evaluate_downstream_zero_shot("mrpc", None, 64, model, tokenizer)
 
                 if accelerator.is_local_main_process:
                     print(f"Step {completed_steps}: eval loss {eval_res['loss']}")
@@ -303,28 +309,33 @@ def finetune_on_downstream_task(
                     # wandb.log(eval_res, step=completed_steps)
 
                 # model.train()
-
             if completed_steps >= max_train_steps:
                 break
         if save_each_epoch:
             save_dir = os.path.join(output_dir, f"epoch-{epoch + 1}")
             accelerator.wait_for_everyone()
+            print("accelerate save pretrained")
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.save_pretrained(save_dir,
                                             is_main_process=accelerator.is_local_main_process,
                                             save_function=accelerator.save)
+            # for n, p in model.named_parameters():
+                # print(f"{n}: {p.shape} {p[:10]}")
+            # print("torch save pretrained")
+            # model.save_pretrained(save_dir, safe_serialization=False)
             if accelerator.is_local_main_process:
                 tokenizer.save_pretrained(save_dir)
-
     # Finish Training!
     accelerator.wait_for_everyone()
-    unwrapped_model = accelerator.unwrap_model(model)
-    unwrapped_model.save_pretrained(os.path.join(output_dir, "latest"),
-                                    is_main_process=accelerator.is_local_main_process,
-                                    save_function=accelerator.save)
+    
 
     if accelerator.is_local_main_process:
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.save_pretrained(os.path.join(output_dir, "latest"),
+                                        is_main_process=accelerator.is_local_main_process,
+                                        save_function=accelerator.save)
         tokenizer.save_pretrained(os.path.join(output_dir, "latest"))
+        evaluate_downstream_zero_shot("mrpc", None, 64, model, tokenizer)
 
     # if accelerator.is_local_main_process and wandb is not None:
         # wandb.finish()

@@ -1,8 +1,8 @@
 export NCCL_P2P_DISABLE=1
-export CUDA_VISIBLE_DEVICES=2,3
+export CUDA_VISIBLE_DEVICES=2
 
 accelerate launch --config_file static/evaluation_config.yaml \
-  --main_process_port 29513 mcsmoe/evaluate-fsgpt-zero-shot.py \
-  --checkpoint="results/fairseq-moe-15b-bf16-permuted" \
+  --main_process_port 29515 mcsmoe/evaluate_zero_shot.py \
+  --checkpoint="/home/wazenmai/Warehouse/NLP/checkpoints/mc-smoe/test/switch-8e-mrpc-test1-4/best" \
   --tasks="mrpc" \
-  --eval_batch_size=32
+  --eval_batch_size=32 |& tee log_eval

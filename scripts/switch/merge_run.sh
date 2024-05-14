@@ -1,0 +1,25 @@
+accelerate launch --config_file static/finetune_config.yaml \
+  mcsmoe/msmoe-merging.py \
+  --per_device_train_batch_size=16 \    # ======== training arguments from here ========
+  --per_device_eval_batch_size=256 \
+  --gradient_accumulation_steps=1 \
+  --preprocessing_num_workers=8 \
+  --num_epochs=10 \
+  --num_eval_steps=100 \
+  --learning_rate=3e-5 \
+  --warmup_steps=16 \
+  --weight_decay=0.01 \
+  --kd_temperature=2 \
+  --mlm_lambda=1.0 \
+  --kd_lambda=0.2 \
+  --task="copa" \     # ======== merging arguments from here ========
+  --num_samples_for_merging=256 \
+  --similarity_base="router-logits" \     # for all available options refer to LEGAL_SIMILARITY_BASES in mcsmoe/merging/grouping.py 
+  --num_groups=8 \    # average number of experts per SMoE layer
+  --globally_group=True \   # if True, apply adaptive merging ratio for each SMoE layer
+  --save_stable_rank=False \    # whether to save stable rank of each expert for analysis
+  --encoder_merging_layers="3,5,7,9,11" \   # encoder layer indices to be merged
+  --decoder_merging_layers="1,3,5,7,9,11" \   # decoder layer indices to be merged
+  --output_dir="results/copa/merged/" \     # M-SMoE checkpoint will be saved here
+  --teacher_checkpoint="results/copa/switch-32e-permuted" \    # KD teacher checkpoint, full SMoE
+  --student_checkpoint="results/copa/switch-32e-permuted"    # KD student checkpoint, will be merged by M-SMoE
