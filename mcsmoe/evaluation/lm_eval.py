@@ -13,7 +13,7 @@ from transformers import (
 
 from lm_eval import evaluator
 from lm_eval.models.huggingface import HFLM
-from lm_eval.tasks import initialize_tasks
+# from lm_eval.tasks import initialize_tasks
 from lm_eval.utils import make_table
 
 TASK_TO_NUM_FEWSHOT = {
@@ -43,7 +43,7 @@ def evaluate_fewshot(
         log: Optional[bool] = True,
         output_path: Optional[str] = None,
 ):
-    initialize_tasks(verbosity="WARNING")
+    # initialize_tasks(verbosity="WARNING")
     lm = HFLM(
         pretrained=model,
         tokenizer=tokenizer,

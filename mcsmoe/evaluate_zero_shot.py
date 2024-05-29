@@ -33,11 +33,6 @@ def prepare_model(
         checkpoint: str,
 ) -> Union[FSGPTMoEForCausalLM, FSGPTForCausalLM]:
     if checkpoint is not None and "moe" in checkpoint:
-        # config = SwitchTransformersConfig.from_pretrained(checkpoint)
-        # state_dict = torch.load(checkpoint + "/pytorch_model.bin")
-        # model = SwitchTransformersForConditionalGeneration(config)
-        # model.load_state_dict(state_dict)
-        # model.to("cpu")
         model = SwitchTransformersForConditionalGeneration.from_pretrained(checkpoint, device_map='auto', torch_dtype=torch.bfloat16)
         print(model.lm_head.weight[:5, :5])
         # model = FSGPTMoEForCausalLM.from_pretrained(

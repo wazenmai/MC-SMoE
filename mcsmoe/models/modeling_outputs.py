@@ -35,6 +35,7 @@ class MoECausalLMOutputWithPastAndCrossAttentions(ModelOutput):
     router_logits: Optional[Tuple[torch.FloatTensor]] = None
 
 
+@dataclass
 class MoECausalLMDistillationOutputWithPastAndCrossAttention(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
@@ -49,6 +50,7 @@ class MoECausalLMDistillationOutputWithPastAndCrossAttention(ModelOutput):
     lm_loss: torch.FloatTensor = None
 
 
+@dataclass
 class MoEDistillationOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     kd_loss: torch.FloatTensor = None
