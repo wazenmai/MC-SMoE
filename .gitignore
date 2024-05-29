@@ -171,3 +171,7 @@ tags
 
 mc_env/
 *.png
+
+mcsmoe/data/c4*.json
+log_*
+.deepspeed_env

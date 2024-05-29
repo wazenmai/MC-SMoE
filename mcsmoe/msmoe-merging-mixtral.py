@@ -17,7 +17,7 @@ def evaluate_mcsmoe(
         task: str,
         num_average_groups: int,
         model_name: Optional[str] = "mistralai/Mixtral-8x7B-v0.1",
-        similarity_base: Optional[str] = "router-logits",
+        similarity_base: Optional[str] = "router-logits", # expert-output
         mode: Optional[str] = "normal", # "normal" "activation-with-router-logits" "input-weight" "learnable weight"
         num_fewshot: Optional[int] = 0,
         eval_batch_size: Optional[int] = 32,
@@ -28,7 +28,7 @@ def evaluate_mcsmoe(
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = MixtralForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16, device_map="auto"
+        torch_dtype=torch.bfloat16, device_map="auto"
     )
 
     # dataloader_for_merging = get_minipile_dataloder(
@@ -51,16 +51,19 @@ def evaluate_mcsmoe(
     print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
 
     grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base)
-    grouper.compute_all_similarities(model, dataloader_for_merging)
+    # grouper.compute_all_similarities(model, dataloader_for_merging)
     grouper.compute_all_usages(model, dataloader_for_merging)
-    dom_experts = grouper.group_experts_globally_from_dominant_experts(
-        num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
-    )
+    # dom_experts = grouper.group_experts_globally_from_dominant_experts(
+    #     num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
+    # )
+    print("_usage_freqeuncy_state_dict: ", grouper._usage_frequency_state_dict)
 
-    # grouper.group_experts_randomly(num_groups=num_average_groups)
+    return
+
+    grouper.group_experts_randomly(num_groups=num_average_groups)
 
     # model = merge_by_groups_with_usage_weighted(
-        # model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+    #     model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
     # )
 
     model.student = merge_by_groups_within_and_across_models(
@@ -74,8 +77,8 @@ def evaluate_mcsmoe(
 
     print(f"[MC-SMoE] ========= Grouping results ========= ")
     for name, state in grouper.group_state_dict().items():
-        print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
-        # print(f"Group {name}: {state.tolist()}")
+        # print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
+        print(f"Group {name}: {state.tolist()}")
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
 
