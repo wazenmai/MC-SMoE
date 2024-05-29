@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List, Union
 
 import torch
-import wandb
+# import wandb
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
@@ -80,6 +80,7 @@ def random_merge_and_distill_downstream_for_recover(
         teacher_checkpoint: Optional[str] = None,
         student_checkpoint: Optional[str] = None,
         task: Optional[str] = "sst2",
+        similarity_base: Optional[str] = "router-logits",
         num_groups: Optional[int] = 8,
         strategy: Optional[str] = "average",
         encoder_merging_layers: Optional[Union[str, List, int]] = None,
@@ -146,7 +147,7 @@ def random_merge_and_distill_downstream_for_recover(
         reg_lambda=training_config.reg_lambda,
     )
 
-    tokenizer = T5TokenizerFast.from_pretrained("google/switch-base-32")
+    tokenizer = T5TokenizerFast.from_pretrained("google/switch-base-8") # 現在發現 tokenizer 用錯會不會太遲
     data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer,
                                            max_length=tokenizer.model_max_length,
                                            return_tensors='pt',
@@ -157,11 +158,11 @@ def random_merge_and_distill_downstream_for_recover(
 
     if accelerator.is_local_main_process:
         run_name = f"random-merge-{strategy}-{task}-{num_groups}"
-        wandb.init(project="mc-smoe",
-                   config={**student_model.config.__dict__,
-                           **training_config.__dict__,
-                           'num_params': student_model.num_parameters()},
-                   name=run_name)
+        # wandb.init(project="mc-smoe",
+        #            config={**student_model.config.__dict__,
+        #                    **training_config.__dict__,
+        #                    'num_params': student_model.num_parameters()},
+        #            name=run_name)
 
     raw_dataset = load_dataset(*TASK_MAPPING_DATASET_ARGUMENTS[task])
 
@@ -243,9 +244,28 @@ def random_merge_and_distill_downstream_for_recover(
 
     grouper = ExpertsGrouperForSwitch(
         config=model.student.config,
+        similarity_base=similarity_base,
     )
-    grouper.group_experts_randomly(num_groups=num_groups)
+    grouper.compute_all_similarities(
+        model=model.student,
+        batch=next(iter(merging_dataloader)),
+    )
+    # grouper.compute_all_usages(
+    #     model=model.student,
+    #     batch=next(iter(merging_dataloader)),
+    # )
+    grouper.group_experts_by_knowledge(
+        model=model.student,
+        dataloader=merging_dataloader,
+        num_groups=num_groups,
+    )
+    grouper.group_experts_into_clusters_by_routing_guided(
+        num_groups=num_groups,
+    )
+    # grouper.group_experts_randomly(num_groups=num_groups)
     print(grouper.group_state_dict())
+    torch.cuda.empty_cache()
+    
     if strategy == "average":
         model.student = merge_by_groups(
             model=model.student,
@@ -375,13 +395,13 @@ def random_merge_and_distill_downstream_for_recover(
                     accelerator.sync_gradients
             ):
                 logger.info(f"epoch {epoch}, step {step}: loss {loss.item()}")
-                wandb.log({"train_loss": loss.item(),
-                           "train_kd_loss": kd_loss.item(),
-                           "train_hd_loss": hd_loss.item(),
-                           "train_task_loss": task_loss.item(),
-                           "train_norm_loss": norm_loss.item(),
-                           "epoch": completed_steps / num_update_steps_per_epoch,
-                           "learning_rate": lr_scheduler.get_lr()}, step=completed_steps)
+                # wandb.log({"train_loss": loss.item(),
+                #            "train_kd_loss": kd_loss.item(),
+                #            "train_hd_loss": hd_loss.item(),
+                #            "train_task_loss": task_loss.item(),
+                #            "train_norm_loss": norm_loss.item(),
+                #            "epoch": completed_steps / num_update_steps_per_epoch,
+                #            "learning_rate": lr_scheduler.get_lr()}, step=completed_steps)
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
@@ -424,11 +444,12 @@ def random_merge_and_distill_downstream_for_recover(
                 if eval_res[metric_key] > best_eval:
                     best_eval = eval_res[metric_key]
                     accelerator.wait_for_everyone()
-                    wandb.summary["best_" + metric_key] = best_eval
+                    # wandb.summary["best_" + metric_key] = best_eval
                     unwrapped_model = accelerator.unwrap_model(model)
                     unwrapped_model.save_pretrained(os.path.join(output_dir, "best"),
                                                     is_main_process=accelerator.is_local_main_process,
-                                                    save_function=accelerator.save)
+                                                    save_function=accelerator.save,
+                                                    safe_serialization=False)
                     if accelerator.is_local_main_process:
                         tokenizer.save_pretrained(os.path.join(output_dir, "best"))
                         print(f"Best model saved with best evaluation {metric_key}: {eval_res[metric_key]}")
@@ -436,7 +457,7 @@ def random_merge_and_distill_downstream_for_recover(
                 if accelerator.is_local_main_process:
                     print(f"Step {completed_steps}: eval loss {eval_res['task_loss']}")
                     eval_res = {("eval_" + k): v for k, v in eval_res.items()}
-                    wandb.log(eval_res, step=completed_steps)
+                    # wandb.log(eval_res, step=completed_steps)
                 # model.student.train()
 
             if completed_steps >= max_train_steps:
@@ -447,13 +468,14 @@ def random_merge_and_distill_downstream_for_recover(
     unwrapped_model = accelerator.unwrap_model(model)
     unwrapped_model.save_pretrained(os.path.join(output_dir, "latest"),
                                     is_main_process=accelerator.is_local_main_process,
-                                    save_function=accelerator.save)
+                                    save_function=accelerator.save,
+                                    safe_serialization=False)
 
     if accelerator.is_local_main_process:
         tokenizer.save_pretrained(os.path.join(output_dir, "latest"))
 
-    if accelerator.is_local_main_process and wandb is not None:
-        wandb.finish()
+    # if accelerator.is_local_main_process and wandb is not None:
+    #     wandb.finish()
 
 
 if __name__ == "__main__":

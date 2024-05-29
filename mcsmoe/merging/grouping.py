@@ -50,7 +50,7 @@ SIMILARITY_MAPPING_FUNCTION = {
 }
 LEGAL_SIMILARITY_BASES = ["weight", "feature", "feature.abs", "weight-feature", "gradient", "weight-gradient",
                           "router-logits", "router-weight", "router-weight-feature", "mse", "random",
-                          "feature-correlation.lsa", "feature-correlation.max"]
+                          "feature-correlation.lsa", "feature-correlation.max", "output"]
 
 
 class ExpertsGrouperForSwitch(object):
@@ -69,6 +69,7 @@ class ExpertsGrouperForSwitch(object):
 
         self.num_experts = config.num_experts
         self.d_model = config.d_model
+        self.d_ff = config.d_ff
         self.sparse_layer_indices = list(range(1, config.num_layers, config.encoder_sparse_step))
         self.similarity_fn = SIMILARITY_MAPPING_FUNCTION[similarity_fn]
         self.similarity_base = similarity_base
@@ -372,6 +373,7 @@ class ExpertsGrouperForSwitch(object):
                     most_similar_core]
         return core_experts
 
+    
     def group_experts_into_clusters_by_spectral_clustering(
             self,
             num_groups: int
@@ -407,6 +409,228 @@ class ExpertsGrouperForSwitch(object):
                 random_state=0
             ).fit(similarity_matrix)
             self._group_state_dict[decoder_mlp_name] = torch.tensor(clustering.labels_, device="cuda")
+
+
+    def group_experts_by_knowledge(
+        self,
+        model: SwitchTransformersForConditionalGeneration,
+        dataloader: DataLoader,
+        num_groups: int,
+    ):
+        # 1. Use knowledge to choose 'num_groups' dominant experts
+        # 2. 用 similarity_fn 算出剩餘的 experts 跟哪個 dominant expert 要組成一組
+        
+        encoder_moe_scores, decoder_moe_scores = self.compute_knowledge(model, dataloader)
+        
+        core_experts = dict()
+        for idx, layer_idx in enumerate(self.sparse_layer_indices):
+            # A. Encoder
+            encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
+            group_member_count = torch.zeros(num_groups)
+            indices_sorted_by_kl = torch.argsort(encoder_moe_scores[idx], descending=True)
+            core_expert_indices = indices_sorted_by_kl[:num_groups]
+            core_experts[encoder_mlp_name] = core_expert_indices.tolist()
+            for i in range(num_groups):
+                self._group_state_dict[encoder_mlp_name][core_expert_indices[i]] = i
+                group_member_count[i] += 1
+            similarity_matrix = self.get_similarity_matrix(encoder_mlp_name)
+            for i in range(num_groups, self.num_experts):
+                most_similar_core = core_expert_indices[
+                    torch.argmax(similarity_matrix[i, core_expert_indices])
+                ]
+                most_similar_group_label = self._group_state_dict[encoder_mlp_name][most_similar_core]
+                self._group_state_dict[encoder_mlp_name][i] = most_similar_group_label
+                group_member_count[most_similar_group_label] += 1
+                if group_member_count[self._group_state_dict[encoder_mlp_name][i]] >= self.num_experts:
+                    if len(core_expert_indices) == 1:
+                        raise ValueError(
+                            f"[Merging]The number of groups at Encoder layer {layer_idx} is too small!"
+                        )
+                    # Kick out the filled group as well as its core, by pop the core from core_experts
+                    core_index = torch.argmax(similarity_matrix[i, core_expert_indices])
+                    core_expert_indices = torch.cat(
+                        [core_expert_indices[:core_index], core_expert_indices[core_index + 1:]]
+                    )
+            
+            # B. Decoder
+            decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
+            group_member_count = torch.zeros(num_groups)
+            indices_sorted_by_kl = torch.argsort(decoder_moe_scores[idx], descending=True)
+            core_expert_indices = indices_sorted_by_kl[:num_groups]
+            core_experts[decoder_mlp_name] = core_expert_indices.tolist()
+            for i in range(num_groups):
+                self._group_state_dict[decoder_mlp_name][core_expert_indices[i]] = i
+                group_member_count[i] += 1
+            similarity_matrix = self.get_similarity_matrix(decoder_mlp_name)
+            for i in range(num_groups, self.num_experts):
+                most_similar_core = core_expert_indices[
+                    torch.argmax(similarity_matrix[i, core_expert_indices])
+                ]
+                most_similar_group_label = self._group_state_dict[decoder_mlp_name][most_similar_core]
+                self._group_state_dict[decoder_mlp_name][i] = most_similar_group_label
+                group_member_count[most_similar_group_label] += 1
+                if group_member_count[self._group_state_dict[decoder_mlp_name][i]] >= self.num_experts:
+                    if len(core_expert_indices) == 1:
+                        raise ValueError(
+                            f"[Merging]The number of groups at Decoder layer {layer_idx} is too small!"
+                        )
+                    # Kick out the filled group as well as its core, by pop the core from core_experts
+                    core_index = torch.argmax(similarity_matrix[i, core_expert_indices])
+                    core_expert_indices = torch.cat(
+                        [core_expert_indices[:core_index], core_expert_indices[core_index + 1:]]
+                    )
+        return core_experts
+        
+        
+
+    def compute_knowledge(
+        self,
+        model: SwitchTransformersForConditionalGeneration,
+        dataloader: DataLoader,
+        lam_pred: Optional[float] = 1.0,
+        lam_rep: Optional[float] = 1e-5,
+        T: Optional[float] = 2,
+    ):
+
+        # 1. Initialization
+        model.eval()
+        num_sparse_layer = len(self.sparse_layer_indices)
+        encoder_moe_pred_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff).cuda()
+        decoder_moe_pred_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff).cuda()
+        encoder_moe_rep_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff).cuda()
+        decoder_moe_rep_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff).cuda()
+
+        encoder_moe_masks = torch.ones(num_sparse_layer, self.num_experts, self.d_ff).cuda()
+        decoder_moe_masks = torch.ones(num_sparse_layer, self.num_experts, self.d_ff).cuda()
+        encoder_moe_masks.requires_grad_(True)
+        decoder_moe_masks.requires_grad_(True)
+
+        handles = []
+        _encoder_inputs = {}
+        _decoder_inputs = {}
+
+        def apply_mask(module, _mask):
+            # applying masks to the input to compute gradients
+            def masking(_, i):
+                return _mask * i[0]
+
+            handle = module.register_forward_pre_hook(masking)
+            return handle
+        
+        def hijack(module, _list, _hijack_input, _stop_forward=False):
+            # if _stop_forward=True, then it raise error after forwarding the module
+            if _hijack_input:
+                def input_hook(_, inputs, __):
+                    _list.append(inputs[0].clone().data)
+                    if _stop_forward:
+                        raise StopFowardException
+
+                handle = module.register_forward_hook(input_hook)
+            else:
+                def output_hook(_, __, outputs):
+                    if isinstance(outputs, tuple):
+                        _list.append(outputs)
+                    else:
+                        _list.append(outputs.clone().data)
+                    if _stop_forward:
+                        raise StopFowardException
+
+                handle = module.register_forward_hook(output_hook)
+            return handle
+
+        # 2. Register hook function
+        for i, layer_idx in enumerate(self.sparse_layer_indices):
+            encoder_experts = model.encoder.block[layer_idx].layer[-1].mlp.experts
+            decoder_experts = model.decoder.block[layer_idx].layer[-1].mlp.experts
+            _encoder_inputs[layer_idx] = {}
+            _decoder_inputs[layer_idx] = {}
+            for e in range(self.num_experts):
+                # Apply layer mask
+                handles.append(
+                    apply_mask(encoder_experts[f'expert_{e}'].wo, encoder_moe_masks[i][e])
+                )
+                handles.append(
+                    apply_mask(decoder_experts[f'expert_{e}'].wo, decoder_moe_masks[i][e])
+                )
+                # Apply input hook
+                _encoder_inputs[layer_idx][e] = []
+                handles.append(
+                    hijack(encoder_experts[f'expert_{e}'].wo, _encoder_inputs[layer_idx][e], _hijack_input=True)
+                )
+                _decoder_inputs[layer_idx][e] = []
+                handles.append(
+                    hijack(decoder_experts[f'expert_{e}'].wo, _decoder_inputs[layer_idx][e], _hijack_input=True)
+                )
+        
+        # 3. Do forward and measure knowledge
+        num_samples = 0
+        num_tokens = 0
+        for b, batch in enumerate(dataloader):
+            for k, v in batch.items():
+                batch[k] = v.cuda()
+            att_mask = batch['attention_mask'].bool()
+            num_tokens += batch['attention_mask'].sum()
+            batch_samples = batch['attention_mask'].shape[0]
+            num_samples += batch_samples
+            outputs = model(**batch)
+            encoder_router_tuples = outputs.encoder_router_logits 
+            decoder_router_tuples = outputs.decoder_router_logits
+
+            pred = F.softmax(outputs.logits / T, dim=1).detach()
+            kl_div = F.kl_div(
+                input=F.log_softmax(outputs.logits / T, dim=1),
+                target=pred,
+                reduction="batchmean"
+            )
+            kl_div.backward()
+
+            # Measure amount of knowledge
+            for i, layer_idx in enumerate(self.sparse_layer_indices):
+                _, encoder_expert_index = encoder_router_tuples[layer_idx]
+                _, decoder_expert_index = decoder_router_tuples[layer_idx]
+                encoder_expert_index = encoder_expert_index[att_mask]
+                decoder_expert_index = decoder_expert_index[att_mask[:, decoder_expert_index.shape[1]]]
+                
+                for e in range(self.num_experts):
+                    ### A. Encoder experts
+                    # get feature
+                    token_id = (encoder_expert_index == e).nonzero()
+                    number_of_tokens = token_id.shape[0]
+                    _features = _encoder_inputs[layer_idx][e][-1][:number_of_tokens]
+
+                    # get weight and calculate representational knowledge
+                    _weight = model.encoder.block[layer_idx].layer[-1].mlp.experts[f'expert_{e}'].wo.weight
+                    encoder_moe_rep_kl[i][e] += ((_features ** 2).sum(dim=0) * (_weight ** 2).mean(dim=0)).data
+
+                    # get gradient and calculate predictive knowledge
+                    grad = encoder_moe_masks.grad[i][e]
+                    encoder_moe_pred_kl[i][e] += (grad.detach() ** 2) * 0.5
+
+                    ### B. Decoder experts
+                    token_id = (decoder_expert_index == e).nonzero()
+                    number_of_tokens = token_id.shape[0]
+                    _features = _decoder_inputs[layer_idx][e][-1][:number_of_tokens]
+                    _weight = model.decoder.block[layer_idx].layer[-1].mlp.experts[f'expert_{e}'].wo.weight
+                    decoder_moe_rep_kl[i][e] += ((_features ** 2).sum(dim=0) * (_weight ** 2).mean(dim=0)).data
+                    grad = decoder_moe_masks.grad[i][e]
+                    decoder_moe_pred_kl[i][e] += (grad.detach() ** 2) * 0.5
+
+                    del _encoder_inputs[layer_idx][e][-1]
+                    del _decoder_inputs[layer_idx][e][-1]
+            encoder_moe_masks.grad = None
+            decoder_moe_masks.grad = None
+        
+        # 4. Averaging score
+        encoder_moe_pred_kl /= num_samples
+        encoder_moe_rep_kl /= num_samples
+        decoder_moe_pred_kl /= num_samples
+        decoder_moe_rep_kl /= num_samples
+
+        # 5. Compute score
+        encoder_moe_scores = (encoder_moe_rep_kl * lam_rep + encoder_moe_pred_kl * lam_pred).mean(dim=2)
+        decoder_moe_scores = (decoder_moe_rep_kl * lam_rep + decoder_moe_pred_kl * lam_pred).mean(dim=2)
+
+        return encoder_moe_scores, decoder_moe_scores
 
     def compute_all_usages(
             self,
@@ -492,6 +716,9 @@ class ExpertsGrouperForSwitch(object):
         elif self.similarity_base == 'feature-correlation.max':
             batch = {k: v.cuda() for k, v in batch.items()}
             self._compute_all_similarities_by_average_feature_correlation(model, batch, lsa=False)
+        elif self.similarity_base == 'output':
+            batch = {k: v.cuda() for k, v in batch.items()}
+            self._compute_all_similarities_by_output(model, batch)
         else:
             raise NotImplementedError
 
@@ -739,6 +966,79 @@ class ExpertsGrouperForSwitch(object):
                 -1, self.d_model)  # of shape (batch_size*sequence_length, hidden_size)
 
         return hook
+    
+    def _get_mlp_output(self, name):
+        def hook(model, input, output):
+            self.mlp_outputs[name] = output[0].detach().reshape(-1, self.d_model)
+        return hook
+
+    def _compute_all_similarities_by_output(
+            self, model: SwitchTransformersForConditionalGeneration, batch: Dict[str, torch.Tensor]
+    ):
+        self.mlp_outputs = {}
+        handles = []
+        for layer_idx in tqdm(self.sparse_layer_indices, desc="[Merging]Registering forward hook..."):
+            encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
+            decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
+            handles.append(model.encoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
+                self._get_mlp_output(encoder_mlp_name)
+            ))
+            handles.append(model.decoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
+                self._get_mlp_output(decoder_mlp_name)
+            ))
+        model = model.eval()
+        encoder_router_indices = {l: None for l in self.sparse_layer_indices}
+        # encoder_router_probs = {l: None for l in self.sparse_layer_indices}
+        decoder_router_indices = {l: None for l in self.sparse_layer_indices}
+        # decoder_router_probs = {l: None for l in self.sparse_layer_indices}
+        with torch.no_grad():
+            outputs = model(**batch)
+            for layer_idx in self.sparse_layer_indices:
+                encoder_router_indices[layer_idx] = outputs.encoder_router_logits[layer_idx][1]
+                decoder_router_indices[layer_idx] = outputs.decoder_router_logits[layer_idx][1]
+                # (B, T, E) -> softmax (B, T, E) -> max (B, T)
+                # encoder_router_probs[layer_idx] = torch.max(
+                #     F.softmax(outputs.encoder_router_logits[layer_idx][0], dim=-1),
+                #     dim=-1,
+                # )
+                # decoder_router_probs[layer_idx] = torch.max(
+                #     F.softmax(outputs.decoder_router_logits[layer_idx][0], dim=-1),
+                #     dim=-1,
+                # )
+        del outputs
+        for handle in handles:
+            handle.remove()
+        torch.cuda.empty_cache()
+
+        progress_bar = tqdm(
+            range(len(self.sparse_layer_indices) * self.num_experts * (self.num_experts - 1) // 2),
+            desc="[Merging]Computing similarities by average feature correlation..."
+        )
+
+        for layer_idx in self.sparse_layer_indices:
+            encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
+            decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
+            encoder_router_expert_index = encoder_router_indices[layer_idx].reshape(-1)
+            decoder_router_expert_index = decoder_router_indices[layer_idx].reshape(-1)
+            # encoder_router_prob = encoder_router_probs[layer_idx].reshape(-1)
+            # decoder_router_prob = decoder_router_probs[layer_idx].reshape(-1)
+            encoder_outputs = self.mlp_outputs[encoder_mlp_name]
+            decoder_outputs = self.mlp_outputs[decoder_mlp_name]
+            with torch.no_grad():
+                for i in range(self.num_experts):
+                    for j in range(i + 1, self.num_experts):
+                        # A. Encoder
+                        i_flat = torch.mean(encoder_outputs[encoder_router_expert_index == i], dim=0)
+                        j_flat = torch.mean(encoder_outputs[encoder_router_expert_index == j], dim=0)
+                        similarity = self.similarity_fn(i_flat, j_flat)
+                        self.save_similarity(encoder_mlp_name, i, j, similarity)
+                        # B. Decoder
+                        i_flat = torch.mean(decoder_outputs[decoder_router_expert_index == i], dim=0)
+                        j_flat = torch.mean(decoder_outputs[decoder_router_expert_index == j], dim=0)
+                        similarity = self.similarity_fn(i_flat, j_flat)
+                        self.save_similarity(decoder_mlp_name, i, j, similarity)
+                        progress_bar.update(1)
+
 
     def _compute_all_similarities_by_feature(
             self, model: SwitchTransformersForConditionalGeneration, batch: Dict[str, torch.Tensor]
@@ -756,7 +1056,7 @@ class ExpertsGrouperForSwitch(object):
             ))
         with torch.no_grad():
             outputs = model(**batch)
-        for layer_idx in tqdm(self.sparse_layer_indices, desc="[Merging]Computing similarities by feature..."):
+        for layer_idx in tqdm(self.sparse_layer_indices, desc="[Merging]Computing similarities by output..."):
             encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
             decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
             # router index of shape (batch_size*sequence_length)
@@ -799,13 +1099,11 @@ class ExpertsGrouperForSwitch(object):
                             j_flat = torch.zeros(self.d_model, device='cuda')
                         similarity = self.similarity_fn(i_flat, j_flat)
                         self.save_similarity(decoder_mlp_name, i, j, similarity)
-        for handle in handles:
-            handle.remove()
 
     def _compute_all_similarities_by_feature_abs(
             self, model: SwitchTransformersForConditionalGeneration, batch: Dict[str, torch.Tensor]
     ):
-        self.activations = {}
+        self.activations = {} # get input of moe
         handles = []
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[Merging]Registering forward hook..."):
             encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"

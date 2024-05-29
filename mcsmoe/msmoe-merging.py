@@ -305,7 +305,7 @@ def merge_and_distill_downstream_for_recover(
     ) if globally_group else grouper.group_experts_into_clusters_by_routing_guided(
         num_groups=num_groups,
     )
-    print(grouper.group_state_dict())
+    print(grouper.group_state_dict()) # {'module name': [group labels of each experts], ...}
     if save_stable_rank:
         save_stable_rank_to(
             core_experts=core_experts,
