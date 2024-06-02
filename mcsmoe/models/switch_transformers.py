@@ -408,3 +408,22 @@ class SwitchTransformersWrapperForDistillation(nn.Module):
                 )
 
         return reg_loss / (len(self.student.config.sparse_encoder_layer_list) * self.student.config.num_experts * 8)
+
+
+def merged_mlp_forward(self, hidden_states):
+    # Step 1: Get the router_mask from the router as wel as the probabilities
+    router_mask, router_probs, router_logits = self.router(hidden_states)
+    expert_index = torch.argmax(router_mask, dim=-1)
+
+    # The routers introduced might not always map all the tokens, to a router, which means that some hidden states
+    # can be unchanged from one layer to another. That is why the hidden states are cloned before updating only the seleced ones.
+
+    next_states = hidden_states.clone()
+    # for idx, expert in enumerate(self.experts.values()):
+    for idx in range(len(self.experts)):
+        expert = self.experts[f"expert_{self.expert_dict[idx]}"]
+        token_indices = router_mask[:, :, idx].bool()
+        next_states[token_indices] = expert(hidden_states[token_indices]).to(next_states.dtype)
+
+    hidden_states = router_probs * next_states
+    return hidden_states, (router_logits, expert_index)
