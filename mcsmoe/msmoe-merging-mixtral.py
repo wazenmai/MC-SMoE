@@ -17,12 +17,14 @@ def evaluate_mcsmoe(
         task: str,
         num_average_groups: int,
         model_name: Optional[str] = "mistralai/Mixtral-8x7B-v0.1",
-        similarity_base: Optional[str] = "router-logits", # expert-output
-        mode: Optional[str] = "normal", # "normal" "activation-with-router-logits" "input-weight" "learnable weight"
+        similarity_base: Optional[str] = "router-logits",
+        mode: Optional[str] = "normal", 
         num_fewshot: Optional[int] = 0,
         eval_batch_size: Optional[int] = 32,
+        partition: Optional[int] = 1,
         output_path: Optional[str] = None,
 ):
+    # torch.cuda.memory._record_memory_history(True)
     eval_ppl = (task == "minipile")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -38,12 +40,14 @@ def evaluate_mcsmoe(
     #     subset_ratio=0.1,
     # )
 
+    print("[MC-SMoE] Number of parameters before merging:", model.num_parameters())
+
     dataloader_for_merging = get_calib_dataloder(
         dataset="c4",
         tokenizer=tokenizer,
         max_block_size=2048,
         n_blocks_for_stat=128,
-        batch_size=eval_batch_size,
+        batch_size=2,
         num_workers=4,
     )
 
@@ -51,14 +55,13 @@ def evaluate_mcsmoe(
     print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
 
     grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base)
-    # grouper.compute_all_similarities(model, dataloader_for_merging)
-    grouper.compute_all_usages(model, dataloader_for_merging)
+    grouper.compute_all_similarities(model, dataloader_for_merging)
+    # grouper.compute_all_usages(model, dataloader_for_merging)
     # dom_experts = grouper.group_experts_globally_from_dominant_experts(
     #     num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
     # )
-    print("_usage_freqeuncy_state_dict: ", grouper._usage_frequency_state_dict)
 
-    return
+    # print(grouper._usage_frequency_state_dict)
 
     grouper.group_experts_randomly(num_groups=num_average_groups)
 
@@ -71,6 +74,7 @@ def evaluate_mcsmoe(
         grouper=grouper,
         dataloader=dataloader_for_merging,
         mode=mode,
+        partition=partition,
         dominant_alone=False,
         usage_weighted=False
     )
@@ -79,6 +83,8 @@ def evaluate_mcsmoe(
     for name, state in grouper.group_state_dict().items():
         # print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
         print(f"Group {name}: {state.tolist()}")
+    
+    model = model.cuda()
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
 

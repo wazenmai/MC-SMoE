@@ -172,6 +172,11 @@ tags
 mc_env/
 *.png
 
-mcsmoe/data/c4*.json
+# 2024/06/02
 log_*
+log
+*.pickle
+*temp*.py
+
+mcsmoe/data/c4*.json
 .deepspeed_env

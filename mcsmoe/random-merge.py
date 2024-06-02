@@ -36,6 +36,7 @@ from mcsmoe.merging import (
 from mcsmoe.models import (
     SwitchTransformersWrapperForDistillation
 )
+from mcsmoe.evaluation import get_calib_dataloder
 
 logger = get_logger(__name__)
 logger.setLevel(20)
@@ -229,12 +230,20 @@ def random_merge_and_distill_downstream_for_recover(
         batch_size=per_device_eval_batch_size,
         num_workers=4
     )
-    merging_dataloader = DataLoader(
-        dataset_for_merging,
-        shuffle=False,
-        collate_fn=data_collator,
-        batch_size=32,
-        num_workers=4
+    # merging_dataloader = DataLoader(
+    #     dataset_for_merging,
+    #     shuffle=False,
+    #     collate_fn=data_collator,
+    #     batch_size=32,
+    #     num_workers=4
+    # )
+    merging_dataloader = get_calib_dataloder(
+        dataset="c4",
+        tokenizer=tokenizer,
+        max_block_size=2048,
+        n_blocks_for_stat=128,
+        batch_size=per_device_eval_batch_size,
+        num_workers=4,
     )
 
     print(f"Random merging")
@@ -246,23 +255,23 @@ def random_merge_and_distill_downstream_for_recover(
         config=model.student.config,
         similarity_base=similarity_base,
     )
-    grouper.compute_all_similarities(
-        model=model.student,
-        batch=next(iter(merging_dataloader)),
-    )
+    # grouper.compute_all_similarities(
+    #     model=model.student,
+    #     batch=next(iter(merging_dataloader)),
+    # )
     # grouper.compute_all_usages(
     #     model=model.student,
     #     batch=next(iter(merging_dataloader)),
     # )
-    grouper.group_experts_by_knowledge(
-        model=model.student,
-        dataloader=merging_dataloader,
-        num_groups=num_groups,
-    )
-    grouper.group_experts_into_clusters_by_routing_guided(
-        num_groups=num_groups,
-    )
-    # grouper.group_experts_randomly(num_groups=num_groups)
+    # grouper.group_experts_by_knowledge(
+    #     model=model.student,
+    #     dataloader=merging_dataloader,
+    #     num_groups=num_groups,
+    # )
+    # grouper.group_experts_into_clusters_by_routing_guided(
+    #     num_groups=num_groups,
+    # )
+    grouper.group_experts_randomly(num_groups=num_groups)
     print(grouper.group_state_dict())
     torch.cuda.empty_cache()
     

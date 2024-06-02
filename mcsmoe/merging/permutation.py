@@ -544,10 +544,12 @@ def merge_switch_mlp_by_activation_matching_within_and_across_models(
         activations.append(input[0].detach().reshape(-1, input[0].shape[-1]))
 
     handle = concat_mlp.wo.register_forward_hook(_activation_hook)
+
+    print(f"Compute activations with data shape {forwarded_hidden_states.shape} and batch size {mini_batch_size}")
+
     with torch.no_grad():
         for i in range(0, forwarded_hidden_states.shape[0], mini_batch_size):
             concat_mlp(forwarded_hidden_states[i:i + mini_batch_size])
-
     activations = torch.cat(activations, dim=0)  # (batch_size * seq_len, d_ff * num_mlp)
 
     # Initialize the correlation matrix

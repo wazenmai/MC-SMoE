@@ -21,6 +21,7 @@ def evaluate_mcsmoe(
         mode: Optional[str] = "normal", # "normal" "activation-with-router-logits" "input-weight" "learnable weight"
         num_fewshot: Optional[int] = 0,
         eval_batch_size: Optional[int] = 32,
+        partition: Optional[int] = 2,
         output_path: Optional[str] = None,
 ):
     eval_ppl = (task == "minipile")
@@ -77,8 +78,10 @@ def evaluate_mcsmoe(
         print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
         # print(f"Group {name}: {state.tolist()}")
 
-    print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
+    
+    model = model.cuda()
 
+    print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if eval_ppl:
         evaluate_minipile_perplexity(
             model, tokenizer=tokenizer, batch_size=eval_batch_size, log=True

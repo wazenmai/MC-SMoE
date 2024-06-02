@@ -1,6 +1,7 @@
 import os
 from collections import OrderedDict
 from copy import deepcopy
+from types import MethodType
 from typing import Dict, Optional, List, Union, Callable, Iterator, Tuple
 
 import torch
@@ -28,6 +29,7 @@ from .permutation import (
 )
 from .utils import generate_random_group_labels
 from ..utils.constants import FP32_EPS
+from mcsmoe.models.switch_transformers import merged_mlp_forward
 
 __all__ = [
     'ExpertsGrouperForSwitch',
@@ -1993,11 +1995,15 @@ def _merge_mlp_experts_within_and_across_models(
     mlp: SwitchTransformersSparseMLP
         The merged mlp.
     """
+
+    mlp.expert_dict = {}
+
     if dominant_alone and core_expert_indices is None:
         raise ValueError("[Merging]dominant_alone is True, but core_expert_indices is None")
 
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
+        print("expert_indices: ", expert_indices)
         with torch.no_grad():
             if dominant_alone:
                 group_core_expert_indices = torch.stack([
@@ -2049,6 +2055,7 @@ def _merge_mlp_experts_within_and_across_models(
                 group_forwarded_hidden_states = torch.cat([
                     forwarded_hidden_states[expert_idx] for expert_idx in expert_indices
                 ], dim=0)
+                print(f"group_forwarded_hidden_states: {group_forwarded_hidden_states.shape}")
                 merged_expert = merge_switch_mlp_by_activation_matching_within_and_across_models(
                     mlp_list=[mlp.experts[f"expert_{expert_idx}"] for expert_idx in expert_indices],
                     forwarded_hidden_states=group_forwarded_hidden_states,
@@ -2056,10 +2063,15 @@ def _merge_mlp_experts_within_and_across_models(
                 )
             mlp.experts[f"expert_{expert_indices[0]}"].wi.weight.copy_(merged_expert.wi.weight)
             mlp.experts[f"expert_{expert_indices[0]}"].wo.weight.copy_(merged_expert.wo.weight)
+
+            mlp.expert_dict[expert_indices[0].item()] = expert_indices[0].item()
             for expert_idx in expert_indices[1:]:
                 # Binding merged experts to the first of them
-                mlp.experts[f"expert_{expert_idx}"] = mlp.experts[f"expert_{expert_indices[0]}"]
-
+                # mlp.experts[f"expert_{expert_idx}"] = mlp.experts[f"expert_{expert_indices[0]}"]
+                mlp.expert_dict[expert_idx.item()] = expert_indices[0].item()
+                mlp.experts[f"expert_{expert_idx}"] = None
+    print(mlp.expert_dict)
+    mlp.forward = MethodType(merged_mlp_forward, mlp)
     return mlp
 
 
@@ -2074,97 +2086,204 @@ def merge_by_groups_within_and_across_models(
         usage_weighted: Optional[bool] = False,
 ) -> SwitchTransformersForConditionalGeneration:
     # {name: values}, values  will be of shape (len(dataloader), batch_size * seq_len, d_ff)
-    forwarded_hidden_states = dict()
+    
 
     usage_frequencies = grouper.usage_frequency_state_dict()
-
-    switch_model.eval().cuda()
-    handles = []
-
-    def _get_activation_hook(name):
-        def hook(module, input, output):
-            forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1]))
-
-        return hook
-
-    for layer_idx in tqdm(
-            grouper.sparse_layer_indices,
-            desc=f"[Merging]Registering forward hook..."
-    ):
-        encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
-        decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
-        forwarded_hidden_states[encoder_mlp_name] = []
-        forwarded_hidden_states[decoder_mlp_name] = []
-        handles.append(switch_model.encoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
-            _get_activation_hook(encoder_mlp_name))
-        )
-        handles.append(switch_model.decoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
-            _get_activation_hook(decoder_mlp_name))
-        )
-
-    # {name: values}, values will be of shape (len(dataloader), batch_size * seq_len)
-    router_indices = {name: [] for name in forwarded_hidden_states.keys()}
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="[Merging]Computing activations..."):
-            batch = {k: v.cuda() for k, v in batch.items()}
-            outputs = switch_model(**batch)
-            for layer_idx in grouper.sparse_layer_indices:
-                router_indices[f"encoder.block.{layer_idx}.layer.1.mlp"].append(
-                    outputs.encoder_router_logits[layer_idx][1].reshape(-1)
-                )
-                router_indices[f"decoder.block.{layer_idx}.layer.2.mlp"].append(
-                    outputs.decoder_router_logits[layer_idx][1].reshape(-1)
-                )
-
-    for handle in handles:
-        handle.remove()
-
     num_experts = grouper.num_experts
-    for layer_idx in tqdm(
-            grouper.sparse_layer_indices,
-            desc=f"[Merging]Merging by groups within and across experts..."
-    ):
-        if encoder_merging_layers is None or layer_idx in encoder_merging_layers:
-            encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
-            encoder_group_labels = grouper.group_state_dict()[encoder_mlp_name]
-            layer_forwarded_hidden_states = tuple()
-            for expert_idx in range(num_experts):
-                layer_forwarded_hidden_states += (
-                    torch.cat(
-                        [forwarded_hidden_states[encoder_mlp_name][i][router_indices[encoder_mlp_name][i] == expert_idx]
-                         for i in range(len(dataloader))], dim=0),
-                )
-            switch_model.encoder.block[layer_idx].layer[
-                -1].mlp = _merge_mlp_experts_within_and_across_models(
-                mlp=switch_model.encoder.block[layer_idx].layer[-1].mlp,
-                group_labels=encoder_group_labels,
-                forwarded_hidden_states=layer_forwarded_hidden_states,
-                dominant_alone=dominant_alone,
-                core_expert_indices=core_experts[encoder_mlp_name] if core_experts is not None else None,
-                usage_frequencies=usage_frequencies[encoder_mlp_name] if usage_weighted else None,
-            )
-        if decoder_merging_layers is None or layer_idx in decoder_merging_layers:
-            decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
-            decoder_group_labels = grouper.group_state_dict()[decoder_mlp_name]
-            layer_forwarded_hidden_states = tuple()
-            for expert_idx in range(num_experts):
-                layer_forwarded_hidden_states += (
-                    torch.cat(
-                        [forwarded_hidden_states[decoder_mlp_name][i][router_indices[decoder_mlp_name][i] == expert_idx]
-                         for i in range(len(dataloader))], dim=0),
-                )
-            switch_model.decoder.block[layer_idx].layer[
-                -1].mlp = _merge_mlp_experts_within_and_across_models(
-                mlp=switch_model.decoder.block[layer_idx].layer[-1].mlp,
-                group_labels=decoder_group_labels,
-                forwarded_hidden_states=layer_forwarded_hidden_states,
-                dominant_alone=dominant_alone,
-                core_expert_indices=core_experts[decoder_mlp_name] if core_experts is not None else None,
-                usage_frequencies=usage_frequencies[decoder_mlp_name] if usage_weighted else None,
-            )
+    switch_model.eval().cuda()
+    # handles = []
 
-    del forwarded_hidden_states, router_indices
-    torch.cuda.empty_cache()
+    print(torch.cuda.memory_summary())
+
+    
+
+    # for layer_idx in tqdm(
+    #         grouper.sparse_layer_indices,
+    #         desc=f"[Merging]Registering forward hook..."
+    # ):
+    #     encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
+    #     decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
+    #     forwarded_hidden_states[encoder_mlp_name] = []
+    #     forwarded_hidden_states[decoder_mlp_name] = []
+    #     handles.append(switch_model.encoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
+    #         _get_activation_hook(encoder_mlp_name))
+    #     )
+    #     handles.append(switch_model.decoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
+    #         _get_activation_hook(decoder_mlp_name))
+    #     )
+
+    # # {name: values}, values will be of shape (len(dataloader), batch_size * seq_len)
+    # router_indices = {name: [] for name in forwarded_hidden_states.keys()}
+    # with torch.no_grad():
+    #     for batch in tqdm(dataloader, desc="[Merging]Computing activations..."):
+    #         batch = {k: v.cuda() for k, v in batch.items()}
+    #         outputs = switch_model(**batch)
+    #         for layer_idx in grouper.sparse_layer_indices:
+    #             router_indices[f"encoder.block.{layer_idx}.layer.1.mlp"].append(
+    #                 outputs.encoder_router_logits[layer_idx][1].reshape(-1)
+    #             )
+    #             router_indices[f"decoder.block.{layer_idx}.layer.2.mlp"].append(
+    #                 outputs.decoder_router_logits[layer_idx][1].reshape(-1)
+    #             )
+
+    # for handle in handles:
+    #     handle.remove()
+
+    # num_experts = grouper.num_experts
+    # for layer_idx in tqdm(
+    #         grouper.sparse_layer_indices,
+    #         desc=f"[Merging]Merging by groups within and across experts..."
+    # ):
+    #     if encoder_merging_layers is None or layer_idx in encoder_merging_layers:
+    #         encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
+    #         encoder_group_labels = grouper.group_state_dict()[encoder_mlp_name]
+    #         layer_forwarded_hidden_states = tuple()
+    #         for expert_idx in range(num_experts):
+    #             layer_forwarded_hidden_states += (
+    #                 torch.cat(
+    #                     [forwarded_hidden_states[encoder_mlp_name][i][router_indices[encoder_mlp_name][i] == expert_idx]
+    #                      for i in range(len(dataloader))], dim=0),
+    #             )
+    #         switch_model.encoder.block[layer_idx].layer[
+    #             -1].mlp = _merge_mlp_experts_within_and_across_models(
+    #             mlp=switch_model.encoder.block[layer_idx].layer[-1].mlp,
+    #             group_labels=encoder_group_labels,
+    #             forwarded_hidden_states=layer_forwarded_hidden_states,
+    #             dominant_alone=dominant_alone,
+    #             core_expert_indices=core_experts[encoder_mlp_name] if core_experts is not None else None,
+    #             usage_frequencies=usage_frequencies[encoder_mlp_name] if usage_weighted else None,
+    #         )
+    #     if decoder_merging_layers is None or layer_idx in decoder_merging_layers:
+    #         decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
+    #         decoder_group_labels = grouper.group_state_dict()[decoder_mlp_name]
+    #         layer_forwarded_hidden_states = tuple()
+    #         for expert_idx in range(num_experts):
+    #             layer_forwarded_hidden_states += (
+    #                 torch.cat(
+    #                     [forwarded_hidden_states[decoder_mlp_name][i][router_indices[decoder_mlp_name][i] == expert_idx]
+    #                      for i in range(len(dataloader))], dim=0),
+    #             )
+    #         switch_model.decoder.block[layer_idx].layer[
+    #             -1].mlp = _merge_mlp_experts_within_and_across_models(
+    #             mlp=switch_model.decoder.block[layer_idx].layer[-1].mlp,
+    #             group_labels=decoder_group_labels,
+    #             forwarded_hidden_states=layer_forwarded_hidden_states,
+    #             dominant_alone=dominant_alone,
+    #             core_expert_indices=core_experts[decoder_mlp_name] if core_experts is not None else None,
+    #             usage_frequencies=usage_frequencies[decoder_mlp_name] if usage_weighted else None,
+    #         )
+    #     print(torch.cuda.memory_summary())
+    
+    def part_processor(sparse_layer_indices):
+        forwarded_hidden_states = dict()
+        handles = []
+        def _get_activation_hook(name):
+            def hook(module, input, output):
+                forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1]))
+
+            return hook
+        for layer_idx in tqdm(
+                sparse_layer_indices,
+                desc=f"[Merging]Registering forward hook..."
+        ):
+            encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
+            decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
+            forwarded_hidden_states[encoder_mlp_name] = []
+            forwarded_hidden_states[decoder_mlp_name] = []
+            handles.append(switch_model.encoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
+                _get_activation_hook(encoder_mlp_name))
+            )
+            handles.append(switch_model.decoder.block[layer_idx].layer[-1].mlp.register_forward_hook(
+                _get_activation_hook(decoder_mlp_name))
+            )
+        
+        print(torch.cuda.memory_summary())
+        torch.cuda.memory._record_memory_history(
+            max_entries=100000
+        )
+
+        # {name: values}, values will be of shape (len(dataloader), batch_size * seq_len)
+        router_indices = {name: [] for name in forwarded_hidden_states.keys()}
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="[Merging]Computing activations..."):
+                batch = {k: v.cuda() for k, v in batch.items()}
+                outputs = switch_model(**batch)
+                for layer_idx in sparse_layer_indices:
+                    router_indices[f"encoder.block.{layer_idx}.layer.1.mlp"].append(
+                        outputs.encoder_router_logits[layer_idx][1].reshape(-1)
+                    )
+                    router_indices[f"decoder.block.{layer_idx}.layer.2.mlp"].append(
+                        outputs.decoder_router_logits[layer_idx][1].reshape(-1)
+                    )
+
+        for handle in handles:
+            handle.remove()
+        
+        try:
+            torch.cuda.memory._dump_snapshot(f"activation.pickle")
+        except Exception as e:
+            print(f"Failed to capture memory snapshot {e}")
+
+        # Stop recording memory snapshot history.
+        torch.cuda.memory._record_memory_history(enabled=None)
+        
+        print(torch.cuda.memory_summary())
+
+        for layer_idx in tqdm(
+                sparse_layer_indices,
+                desc=f"[Merging]Merging by groups within and across experts..."
+        ):
+            if encoder_merging_layers is None or layer_idx in encoder_merging_layers:
+                encoder_mlp_name = f"encoder.block.{layer_idx}.layer.1.mlp"
+                encoder_group_labels = grouper.group_state_dict()[encoder_mlp_name]
+                layer_forwarded_hidden_states = tuple()
+                for expert_idx in range(num_experts):
+                    layer_forwarded_hidden_states += (
+                        torch.cat(
+                            [forwarded_hidden_states[encoder_mlp_name][i][router_indices[encoder_mlp_name][i] == expert_idx]
+                            for i in range(len(dataloader))], dim=0),
+                    )
+                switch_model.encoder.block[layer_idx].layer[
+                    -1].mlp = _merge_mlp_experts_within_and_across_models(
+                    mlp=switch_model.encoder.block[layer_idx].layer[-1].mlp,
+                    group_labels=encoder_group_labels,
+                    forwarded_hidden_states=layer_forwarded_hidden_states,
+                    dominant_alone=dominant_alone,
+                    core_expert_indices=core_experts[encoder_mlp_name] if core_experts is not None else None,
+                    usage_frequencies=usage_frequencies[encoder_mlp_name] if usage_weighted else None,
+                )
+            if decoder_merging_layers is None or layer_idx in decoder_merging_layers:
+                decoder_mlp_name = f"decoder.block.{layer_idx}.layer.2.mlp"
+                decoder_group_labels = grouper.group_state_dict()[decoder_mlp_name]
+                layer_forwarded_hidden_states = tuple()
+                for expert_idx in range(num_experts):
+                    layer_forwarded_hidden_states += (
+                        torch.cat(
+                            [forwarded_hidden_states[decoder_mlp_name][i][router_indices[decoder_mlp_name][i] == expert_idx]
+                            for i in range(len(dataloader))], dim=0),
+                    )
+                switch_model.decoder.block[layer_idx].layer[
+                    -1].mlp = _merge_mlp_experts_within_and_across_models(
+                    mlp=switch_model.decoder.block[layer_idx].layer[-1].mlp,
+                    group_labels=decoder_group_labels,
+                    forwarded_hidden_states=layer_forwarded_hidden_states,
+                    dominant_alone=dominant_alone,
+                    core_expert_indices=core_experts[decoder_mlp_name] if core_experts is not None else None,
+                    usage_frequencies=usage_frequencies[decoder_mlp_name] if usage_weighted else None,
+                )
+        del forwarded_hidden_states, router_indices
+        torch.cuda.empty_cache()
+        print(torch.cuda.memory_summary())
+
+    print(grouper.sparse_layer_indices)
+    partition_num = len(grouper.sparse_layer_indices) // 2
+    for i in range(0, len(grouper.sparse_layer_indices), partition_num):
+        cur_indices = grouper.sparse_layer_indices[i:i+partition_num]
+        print("cur: ", cur_indices)
+        part_processor(cur_indices)
+
+
+    
     return switch_model
 
 
