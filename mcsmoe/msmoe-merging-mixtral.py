@@ -92,6 +92,12 @@ def evaluate_mcsmoe(
         evaluate_minipile_perplexity(
             model, tokenizer=tokenizer, batch_size=eval_batch_size, log=True
         )
+    elif "," in task:
+        tasks = task.split(",")
+        for t in tasks:
+            evaluate_fewshot(
+                model, tokenizer=tokenizer, task=task, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", log=True
+            )
     else:
         evaluate_fewshot(
             model, tokenizer=tokenizer, task=task, num_fewshot=num_fewshot, output_path=output_path, log=True
