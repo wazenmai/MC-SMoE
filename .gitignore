@@ -171,3 +171,9 @@ tags
 
 mc_env/
 *.png
+
+# 2024/06/02
+log_*
+log
+*.pickle
+*temp*.py
