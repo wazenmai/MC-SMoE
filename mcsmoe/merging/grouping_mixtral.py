@@ -300,6 +300,7 @@ class ExpertsGrouperForMixtral(object):
             batch_router_logits = outputs.router_logits
             batch_router_logits = torch.stack(batch_router_logits)  # (num_hidden_layers, num_tokens, num_experts)
             all_router_logits.append(batch_router_logits)
+            del outputs
 
         all_router_logits = torch.cat(all_router_logits, dim=1)  # (num_hidden_layers, *, num_experts)
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by router logits..."):
@@ -321,7 +322,7 @@ class ExpertsGrouperForMixtral(object):
         handles = []
         def _get_activation_hook(name):
             def hook(module, input, output):
-                forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1]))
+                forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
             return hook
         
         for layer_idx in tqdm(
@@ -349,7 +350,7 @@ class ExpertsGrouperForMixtral(object):
 
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by expert outputs..."):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
-            layer_input = torch.cat(forwarded_hidden_states[ffn_name])
+            layer_input = torch.cat(forwarded_hidden_states[ffn_name]).cuda()
             expert_outputs = [] # (E, #T, D) -> average -> (E, D)
             with torch.no_grad():
                 for i in range(self.num_experts):
@@ -360,7 +361,7 @@ class ExpertsGrouperForMixtral(object):
                         j_flat = expert_outputs[j].flatten()
                         similarity = self.similarity_fn(i_flat, j_flat)
                         self.save_similarity(ffn_name, i, j, similarity)
-        
+            del layer_input
         torch.cuda.empty_cache()
 
 @torch.no_grad()
@@ -408,8 +409,8 @@ def merge_mixtral_moe_by_activation_matching_within_and_across_models(
 ) -> MixtralBlockSparseTop2MLP:
     
     ffn_list = [ffn.eval() for ffn in ffn_list]
-    concat_ffn = deepcopy(ffn_list[0])
-    d_ff, d_model = concat_ffn.w1.out_features, concat_ffn.w1.in_features
+    # concat_ffn = deepcopy(ffn_list[0])
+    d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
     if input_weight is not None:
         average_coefs = []
         for w in input_weight:
@@ -450,14 +451,14 @@ def merge_mixtral_moe_by_activation_matching_within_and_across_models(
             activations_dict[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
         return _activation_hook
     
-    forwarded_hidden_states = forwarded_hidden_states.cuda()
+    
     # handle = concat_ffn.w2.register_forward_hook(_activation_hook) 
 
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
     forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:10000]] # forwarded_hidden_states.shape[0] // 40
-    
+    forwarded_hidden_states = forwarded_hidden_states.cuda()
     
 
     for ffn_idx, ffn in enumerate(ffn_list):
@@ -635,7 +636,7 @@ def _merge_moe_experts_within_and_across_models(
         # p += 1
 
     # Stop recording memory snapshot history.
-    torch.cuda.memory._record_memory_history(enabled=None)
+    # torch.cuda.memory._record_memory_history(enabled=None)
     
     print(moe.expert_dict)
 
@@ -702,75 +703,6 @@ def merge_by_groups_within_and_across_models(
             forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
 
         return hook
-    
-    # for layer_idx in tqdm(
-    #         grouper.sparse_layer_indices,
-    #         desc=f"[Merging]Registering forward hook..."
-    # ):
-    #     ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
-    #     forwarded_hidden_states[ffn_name] = []
-    #     handles.append(mixtral_model.model.layers[layer_idx].block_sparse_moe.register_forward_hook(
-    #         _get_activation_hook(ffn_name))
-    #     )
-
-    # print(torch.cuda.memory_summary())
-    
-    # router_indices = {name: [] for name in forwarded_hidden_states.keys()}
-    # if mode == "activation-with-router-logits":
-    #     router_weights = {name: [] for name in forwarded_hidden_states.keys()}
-    # with torch.no_grad():
-    #     for batch in tqdm(dataloader, desc="[Merging]Computing activations..."):
-    #         batch = {k: v.cuda() for k, v in batch.items()}
-    #         outputs = mixtral_model(**batch, output_router_logits=True)
-    #         for layer_idx in grouper.sparse_layer_indices:
-    #             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
-    #             routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1, dtype=torch.float)
-    #             routing_weights, selected_experts = torch.topk(routing_weights, mixtral_model.config.num_experts_per_tok, dim=-1)
-    #             router_indices[ffn_name].append(selected_experts)
-    #             if mode == "activation-with-router-logits":
-    #                 router_weights[ffn_name].append(routing_weights)
-    #         del outputs
-                    
-    # for handle in handles:
-    #     handle.remove()
-    
-    # num_experts = grouper.num_experts
-    # for layer_idx in tqdm(
-    #         grouper.sparse_layer_indices,
-    #         desc=f"[Merging]Merging by groups within and across experts..."
-    # ):
-    #     ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
-    #     group_labels = grouper.group_state_dict()[ffn_name]
-    #     layer_forwarded_hidden_states = tuple()
-    #     for expert_idx in range(num_experts): # expert num
-    #         hidden_states_list = []
-    #         for i in range(len(dataloader)): # batch of data
-    #             batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[ffn_name][i]))])
-    #             if mode == "activation-with-router-logits":
-    #                 router_weight = []
-    #                 for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-    #                     for r, ind in enumerate(router_indices[ffn_name][i][j]): # token's router-logits and expert-index
-    #                         if expert_idx == ind:
-    #                             batch_tensor[j] = True
-    #                             router_weight.append(router_weights[ffn_name][i][j][r])
-    #                 router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].device)
-    #                 hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
-    #             else:
-    #                 for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-    #                     if expert_index in router_indices[ffn_name][i][j]:
-    #                         batch_tensor[j] = True
-    #                 hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor])
-    #         layer_forwarded_hidden_states += (
-    #             torch.cat(hidden_states_list, dim=0),
-    #         )
-    #     mixtral_model.model.layers[layer_idx].block_sparse_moe = _merge_moe_experts_within_and_across_models(
-    #         moe=mixtral_model.model.layers[layer_idx].block_sparse_moe,
-    #         group_labels=group_labels,
-    #         forwarded_hidden_states=layer_forwarded_hidden_states,
-    #         dominant_alone=dominant_alone,
-    #         core_expert_indices=core_experts[ffn_name] if core_experts is not None else None,
-    #         usage_frequencies=usage_frequencies[ffn_name] if usage_weighted else None,
-    #     )
     
     # Since OOM, We can devide it into 2 parts
     def part_processor(sparse_layer_indices):
@@ -850,7 +782,7 @@ def merge_by_groups_within_and_across_models(
         cur_indices = grouper.sparse_layer_indices[i:i+partition_num]
         print("cur: ", cur_indices)
         part_processor(cur_indices)
-        snapshot = torch.cuda.memory._snapshot()
+        # snapshot = torch.cuda.memory._snapshot()
         # print(snapshot['segments'])
         # dump(snapshot, open(f"my_snapshot_{i}.pickle", "wb"))
         print(torch.cuda.memory_summary())

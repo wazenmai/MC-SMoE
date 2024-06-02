@@ -24,7 +24,7 @@ def evaluate_mcsmoe(
         partition: Optional[int] = 1,
         output_path: Optional[str] = None,
 ):
-    torch.cuda.memory._record_memory_history(True)
+    # torch.cuda.memory._record_memory_history(True)
     eval_ppl = (task == "minipile")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token_id = tokenizer.eos_token_id
