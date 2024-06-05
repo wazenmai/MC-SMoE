@@ -215,6 +215,29 @@ class ExpertsGrouperForMixtral(object):
 
         return dom_experts
     
+    
+    def group_experts_layerwise_by_freq(
+        self,
+        num_groups: int,
+    ) -> Dict[str, List[int]]:
+        core_experts = dict()
+        for layer_idx in tqdm(self.sparse_layer_indices, desc=f"Grouping experts layerwise by frequency"):
+            moe_name = f"model.layers.{layer_idx}.block_sparse_moe"
+            indices_sorted_by_usage = torch.argsort(self._usage_frequency_state_dict[moe_name], descending=True)
+            core_expert_indices = indices_sorted_by_usage[:num_groups]
+            core_experts[moe_name] = core_expert_indices.tolist()
+            for i in range(num_groups):
+                self._group_state_dict[moe__name][core_expert_indices[i]] = i
+            similarity_matrix = self.get_similarity_matrix(moe_name)
+            for i in range(num_groups, self.num_experts):
+                most_similar_core = core_expert_indices[
+                    torch.argmax(similarity_matrix[i, core_expert_indices])
+                ]
+                most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
+                self._group_state_dict[moe_name][i] = most_similar_group_label
+        return core_experts
+    
+
 
     #TODO: group_experts_by_knowledge_layerwise
     #TODO: group_experts_by_knowledge_globally
