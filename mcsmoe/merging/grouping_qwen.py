@@ -256,15 +256,15 @@ class ExpertsGrouperForQwen2MoE(object):
             for i in range(self.num_experts):
                 for j in range(i + 1, self.num_experts):
                     i_flat = torch.cat(
-                        [state_dict[f"{ffn_name}.experts.{i}.w1.weight"].flatten(),
-                         state_dict[f"{ffn_name}.experts.{i}.w2.weight"].flatten(),
-                         state_dict[f"{ffn_name}.experts.{i}.w3.weight"].flatten()],
+                        [state_dict[f"{ffn_name}.experts.{i}.gate_proj.weight"].flatten(),
+                         state_dict[f"{ffn_name}.experts.{i}.down_proj.weight"].flatten(),
+                         state_dict[f"{ffn_name}.experts.{i}.up_proj.weight"].flatten()],
                         dim=0
                     )
                     j_flat = torch.cat(
-                        [state_dict[f"{ffn_name}.experts.{j}.w1.weight"].flatten(),
-                         state_dict[f"{ffn_name}.experts.{j}.w2.weight"].flatten(),
-                         state_dict[f"{ffn_name}.experts.{j}.w3.weight"].flatten()],
+                        [state_dict[f"{ffn_name}.experts.{j}.gate_proj.weight"].flatten(),
+                         state_dict[f"{ffn_name}.experts.{j}.down_proj.weight"].flatten(),
+                         state_dict[f"{ffn_name}.experts.{j}.up_proj.weight"].flatten()],
                         dim=0
                     )
                     similarity = self.similarity_fn(i_flat, j_flat)
