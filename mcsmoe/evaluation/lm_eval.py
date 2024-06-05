@@ -42,18 +42,20 @@ def evaluate_fewshot(
         num_fewshot: int,
         log: Optional[bool] = True,
         output_path: Optional[str] = None,
+        eval_batch_size: Optional[int] = 1,
 ):
     # initialize_tasks(verbosity="WARNING")
     lm = HFLM(
         pretrained=model,
         tokenizer=tokenizer,
         batch_size=1,
+        device_map="auto"
     )
     results = evaluator.simple_evaluate(
         model=lm,
         tasks=task,
         num_fewshot=num_fewshot,
-        batch_size=1,
+        batch_size=eval_batch_size,
     )
 
     if output_path:

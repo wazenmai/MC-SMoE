@@ -3,6 +3,7 @@
 # @Time: 2024/2/18
 from typing import Optional
 
+import os
 import logging
 import torch
 from fire import Fire
@@ -47,7 +48,7 @@ def evaluate_mcsmoe(
         tokenizer=tokenizer,
         max_block_size=2048,
         n_blocks_for_stat=128,
-        batch_size=2,
+        batch_size=eval_batch_size,
         num_workers=4,
     )
 
@@ -56,20 +57,20 @@ def evaluate_mcsmoe(
 
     grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base)
     grouper.compute_all_similarities(model, dataloader_for_merging)
-    # grouper.compute_all_usages(model, dataloader_for_merging)
-    # dom_experts = grouper.group_experts_globally_from_dominant_experts(
-    #     num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
-    # )
+    grouper.compute_all_usages(model, dataloader_for_merging)
+    dom_experts = grouper.group_experts_globally_from_dominant_experts(
+        num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
+    )
 
     # print(grouper._usage_frequency_state_dict)
 
-    grouper.group_experts_randomly(num_groups=num_average_groups)
+    # grouper.group_experts_randomly(num_groups=num_average_groups)
 
     # model = merge_by_groups_with_usage_weighted(
     #     model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
     # )
 
-    model.student = merge_by_groups_within_and_across_models(
+    model = merge_by_groups_within_and_across_models(
         mixtral_model=model,
         grouper=grouper,
         dataloader=dataloader_for_merging,
@@ -81,10 +82,13 @@ def evaluate_mcsmoe(
 
     print(f"[MC-SMoE] ========= Grouping results ========= ")
     for name, state in grouper.group_state_dict().items():
-        # print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
-        print(f"Group {name}: {state.tolist()}")
+        print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
+        # print(f"Group {name}: {state.tolist()}")
     
     model = model.cuda()
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+    torch.save(model.state_dict(), output_path + "/model.pt")
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
 
@@ -92,11 +96,10 @@ def evaluate_mcsmoe(
         evaluate_minipile_perplexity(
             model, tokenizer=tokenizer, batch_size=eval_batch_size, log=True
         )
-    elif "," in task:
-        tasks = task.split(",")
+    elif isinstance(task, tuple):
         for t in tasks:
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=task, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", log=True
+                model, tokenizer=tokenizer, task=task, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", log=True, eval_batch_size=eval_batch_size
             )
     else:
         evaluate_fewshot(

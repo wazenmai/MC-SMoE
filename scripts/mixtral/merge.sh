@@ -7,10 +7,10 @@ export TOKENIZERS_PARALLELISM="false"
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29513 mcsmoe/msmoe-merging-mixtral.py \
   --model_name="s3nh/TinyLLama-4x1.1B-MoE" \
-  --task="arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte,winogrande" \
-  --similarity_base="expert-output" \
-  --mode="activation-with-router-logits" \
+  --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
+  --similarity_base="router-logits" \
+  --mode="normal" \
   --num_average_groups=2 \
-  --eval_batch_size=8 \
-  --partition=2 \
-  --output_path="/home/wazenmai/Warehouse/NLP/checkpoints/mc-smoe/s3nh-tinyllama-4e/merge-2e/expert-output-group-zipit-activation-with-router-logits-merge-10000"
+  --eval_batch_size=16 \
+  --partition=1 \
+  --output_path="/home/u2139934/Warehouse/models/mc-smoe/s3nh-tinyllama-4e/merge-2e/freq-dom-router-logits-group-zipit-merge-10000"

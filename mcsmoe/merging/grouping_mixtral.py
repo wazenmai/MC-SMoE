@@ -186,7 +186,6 @@ class ExpertsGrouperForMixtral(object):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
             num_groups = num_groups_per_layer[ffn_name]
             indices_sorted_by_usage = torch.argsort(self._usage_frequency_state_dict[ffn_name], descending=True)
-
             # 1 Assign top-K most-used experts with label 0 to K-1 respectively
             core_expert_indices = indices_sorted_by_usage[:num_groups]
             dom_experts[ffn_name] = core_expert_indices.tolist()
@@ -195,6 +194,7 @@ class ExpertsGrouperForMixtral(object):
 
             # 2 Assign left unassigned experts to the cluster with the most similar core
             similarity_matrix = self.get_similarity_matrix(ffn_name)
+            print(similarity_matrix)
             for i in range(num_groups, self.num_experts):
                 # Find the most similar core
                 most_similar_core = core_expert_indices[
@@ -457,7 +457,7 @@ def merge_mixtral_moe_by_activation_matching_within_and_across_models(
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:10000]] # forwarded_hidden_states.shape[0] // 40
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:100000]] # forwarded_hidden_states.shape[0] // 40
     forwarded_hidden_states = forwarded_hidden_states.cuda()
     
 
@@ -491,19 +491,13 @@ def merge_mixtral_moe_by_activation_matching_within_and_across_models(
     
     print("activations: ", activations.shape)
 
-    # Initialize the correlation matrix
     mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
-    # print("mean: ", mean.shape)
     std = activations.std(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
     covar = torch.mm(
         (activations - mean).t(),
         (activations - mean)
     ) / (activations.shape[0] - 1)  # (d_ff * num_ffn, d_ff * num_ffn)
-    # print("covar: ", covar.shape)
-    # del activations, mean
     corr_matrix = covar / (std.t() * std + FP32_EPS)  # (d_ff * num_ffn, d_ff * num_ffn)
-    # print("corr_matrix: ", corr_matrix.shape)
-    # print(torch.arange(d_ff * num_ffn))
 
     del activations, covar, std, mean
     # gc.collect()
@@ -570,6 +564,8 @@ def merge_mixtral_moe_by_activation_matching_within_and_across_models(
     merged_ffn.w2.weight.data = ffn_all_w2
     merged_ffn.w3.weight.data = ffn_all_w3
 
+    del ffn_all_w1, ffn_all_w2, ffn_all_w3, ffn_list
+
     return merged_ffn
 
 @torch.no_grad()
@@ -593,6 +589,7 @@ def _merge_moe_experts_within_and_across_models(
 #    )
 
     # p = 0
+    print(f"group labels: {group_labels}")
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
         print("\nexpert_indices: ", expert_indices)
@@ -612,7 +609,7 @@ def _merge_moe_experts_within_and_across_models(
             merged_expert = merge_mixtral_moe_by_activation_matching_within_and_across_models(
                 ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
                 forwarded_hidden_states=group_forwarded_hidden_states,
-                mini_batch_size=2048,
+                mini_batch_size=4096,
                 average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                 input_weight=input_weight,
             )
@@ -786,3 +783,5 @@ def merge_by_groups_within_and_across_models(
         # print(snapshot['segments'])
         # dump(snapshot, open(f"my_snapshot_{i}.pickle", "wb"))
         print(torch.cuda.memory_summary())
+    
+    return mixtral_model
