@@ -3,6 +3,7 @@
 # @Time: 2024/2/18
 from typing import Optional
 
+import os
 import logging
 import torch
 from fire import Fire
@@ -52,7 +53,7 @@ def evaluate_mcsmoe(
         tokenizer=tokenizer,
         max_block_size=2048,
         n_blocks_for_stat=128,
-        batch_size=1,
+        batch_size=2,
         num_workers=4,
     )
 
@@ -62,8 +63,6 @@ def evaluate_mcsmoe(
     grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base)
     grouper.compute_all_similarities(model, dataloader_for_merging)
     
-    # dom_experts = None
-
     if dominant == "random":
         grouper.group_experts_randomly(num_groups=num_average_groups)
     elif dominant == "frequency":
@@ -95,12 +94,12 @@ def evaluate_mcsmoe(
             f"Accepted dominant methods are `random`, `frequency` and `knowledge`, but you input {dominant}"
         )
 
-    # grouper.group_experts_randomly(num_groups=num_average_groups)
-
+    # Freq-merge
     # model = merge_by_groups_with_usage_weighted(
     #     model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
     # )
 
+    # ZipIt merge
     # model = merge_by_groups_within_and_across_models(
     #     mixtral_model=model,
     #     grouper=grouper,
@@ -111,6 +110,7 @@ def evaluate_mcsmoe(
     #     usage_weighted=False
     # )
 
+    dom_experts = grouper.core_experts
 
     print(f"[MC-SMoE] ========= Grouping results ========= ")
     for name, state in grouper.group_state_dict().items():

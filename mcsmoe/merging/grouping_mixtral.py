@@ -739,6 +739,7 @@ class ExpertsGrouperForMixtral(object):
 
             # 2.3 Do forward and measure knowledge
             num_samples = 0
+            num_tokens = 0
             _index = 0
             print("[Computing] Do forward and measure knowledge on batch ")
             for b, batch in enumerate(dataloader):
@@ -747,6 +748,7 @@ class ExpertsGrouperForMixtral(object):
                 att_mask = batch['attention_mask'].bool().reshape(-1)
                 batch_samples = batch['attention_mask'].shape[0]
                 num_samples += batch_samples
+                num_tokens += att_mask.sum().item()
                 outputs = model(**batch, output_router_logits=True)
                 router_logits = outputs.router_logits
                 
@@ -807,7 +809,7 @@ class ExpertsGrouperForMixtral(object):
             
             # 2.4 Averaging score
             moe_pred_kl /= num_samples
-            moe_rep_kl /= num_samples
+            moe_rep_kl /= num_tokens
 
             print(f"moe_pred_kl: {num_samples} {moe_pred_kl.shape} {moe_pred_kl}")
             print(f"moe_rep_kl: {moe_rep_kl.shape} {moe_rep_kl}")
@@ -851,6 +853,7 @@ class ExpertsGrouperForMixtral(object):
                         [core_expert_indices[:core_index], core_expert_indices[core_index + 1:]]
                     )
             print(f"core expert: {core_experts[moe_name]}")
+            
             # STEP: 4. Zipit Merge
             group_labels = self._group_state_dict[moe_name]
             layer_forwarded_hidden_states = tuple()
@@ -892,7 +895,215 @@ class ExpertsGrouperForMixtral(object):
 
         return model
 
+
+    def prune_columns_then_merge_layerwise(
+            self,
+            model: MixtralForCausalLM,
+            dataloader: DataLoader,
+            num_groups: int,
+            lam_pred: Optional[float] = 1.0,
+            lam_rep: Optional[float] = 1e-5,
+            T: Optional[float] = 2,
+    ):
+        # kprune to prune experts: collect knowledge and do mask search
+        # merge experts by 最不相似的两个合并
+
+        core_experts = dict()
+        kd_labels = []
+        ratio = self.num_experts // num_groups
+
+        for layer_idx in self.sparse_layer_indices:
+            moe_name = f"model.layers.{layer_idx}.block_sparse_moe"
+            print(f"[Process-Start] ---------------- Layer {layer_idx} / {len(self.sparse_layer_indices)} ---------------- ")
             
+            # 1. Compute knowledge
+
+            model.eval().cuda()
+            for name, p in model.named_parameters():
+                p.requires_grad_(False)
+            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
+            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
+            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(model.device)
+            moe_masks.requires_grad_(True)
+
+            handles = []
+            _inputs = {}
+
+            # Register hook function
+            experts = model.model.layers[layer_idx].block_sparse_moe.experts
+            for e in range(self.num_experts):
+                # Apply layer mask
+                handles.append(
+                    apply_mask(experts[e].w2, moe_masks[e])
+                )
+                # Apply input hook
+                _inputs[e] = []
+                handles.append(
+                    hijack(experts[e].w2, _inputs[e], _hijack_input=True)
+                )
+            
+            # Do forward and measure knowledge
+            num_samples = 0
+            num_tokens = 0
+            _index = 0
+            print("[Computing] Do forward and measure knowledge on batch ")
+            for b, batch in enumerate(dataloader):
+                print(b, end='')
+                batch = {k: v.cuda() for k, v in batch.items()}
+                att_mask = batch['attention_mask'].bool().reshape(-1)
+                batch_samples = batch['attention_mask'].shape[0]
+                num_samples += batch_samples
+                num_tokens += batch['attention_mask'].sum()
+                outputs = model(**batch, output_router_logits=True)
+                router_logits = outputs.router_logits
+
+                if layer_idx == 0:
+                    pred = F.softmax(outputs.logits / T, dim=1).detach()
+                    kd_labels.append(pred.cpu())
+                else:
+                    pred = kd_labels[_index:_index + batch_samples, :].to(model.device)
+                    _index += batch_samples
+                kl_div = F.kl_div(
+                    input=F.log_softmax(outputs.logits / T, dim=1),
+                    target=pred,
+                    reduction="batchmean"
+                ) * (T ** 2)
+
+                kl_div.backward()
+
+                del outputs, pred, kl_div
+                routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+                routing_weights, selected_experts = torch.topk(routing_weights, model.config.num_experts_per_tok, dim=-1)
+                expert_index = selected_experts[att_mask]
+                del routing_weights, selected_experts
+                for e in range(self.num_experts):
+                    # get feature
+                    token_id = (expert_index == e).nonzero()
+                    number_of_tokens = token_id.shape[0]
+                    _features = _inputs[e][-1][:number_of_tokens].cuda()
+
+                    # get weight and calculate representational knowledge
+                    _weight = model.model.layers[layer_idx].block_sparse_moe.experts[e].w2.weight
+                    moe_rep_kl[e] += ((_features ** 2).sum(dim=0) * (_weight ** 2).mean(dim=0)).data
+
+                    # get gradient and calculate predictive knowledge
+                    grad = moe_masks.grad[e]
+                    moe_pred_kl[e] += (grad.detach() ** 2) * 0.5
+
+                    # if layer_idx == 1:
+                    #     print(f"e: {e} {moe_rep_kl[e].shape} {moe_rep_kl[e]}")
+                    #     print(f"{moe_pred_kl[e].shape} {moe_pred_kl[e]}")
+                    del _inputs[e][-1], _features, _weight, grad
+                
+                moe_masks.grad = None
+            moe_pred_kl /= num_samples
+            moe_rep_kl /= num_tokens
+
+            moe_scores = (lam_rep * moe_rep_kl + lam_pred * moe_pred_kl)
+            if layer_idx == 0:
+                kd_labels = torch.cat(kd_labels, dim=0)
+                # print(f"kd_labels: {kd_labels.shape} {kd_labels}")
+            for handle in handles:
+                handle.remove()
+            del _inputs, handles
+ 
+            # 2. Find mask and prune expert neuron
+            s_tilde = moe_scores.view(-1).sort().values
+            print(f"\nscore: {s_tilde[s_tilde.shape[0] // ratio]} {s_tilde}")
+            pruning_mask = (moe_scores > s_tilde[s_tilde.shape[0] // ratio])
+            print(pruning_mask.shape, pruning_mask)
+            print(f"intermediate_size: {self.d_ff}, model_size: {self.d_model}")
+
+            # 3. Group experts by similarity -> one group two experts
+            for i in range(self.num_experts):
+                for j in range(i + 1, self.num_experts):
+                    i_flat = torch.tensor([0 if pruning_mask[i][k] == False else 1 for k in range(self.d_ff)], dtype=torch.float)
+                    j_flat = torch.tensor([0 if pruning_mask[i][j] == False else 1 for k in range(self.d_ff)], dtype=torch.float)
+                    similarity = self.similarity_fn(i_flat, j_flat)
+                    self.save_similarity(moe_name, i, j, -similarity) # different -> merge
+            
+            group_member_count = torch.zeros(num_groups)
+            indices_sorted_by_kl = torch.argsort(moe_scores.mean(dim=-1), descending=True).cpu()
+            # Assign top-K highest score experts with label 0 to K-1 respectively
+            core_expert_indices = indices_sorted_by_kl[:num_groups]
+            core_experts[moe_name] = core_expert_indices.tolist()
+            for i in range(num_groups):
+                self._group_state_dict[moe_name][core_expert_indices[i]] = i
+                group_member_count[i] += 1
+            # Assign left unassigned experts to the cluster with the most similar score
+            similarity_matrix = self.get_similarity_matrix(moe_name)
+            print(similarity_matrix)
+            print(f"Before grouping: {self._group_state_dict[moe_name]}")
+            for i in range(0, self.num_experts):
+                if i in core_expert_indices:
+                    continue
+                similarities_to_core = similarity_matrix[i, core_expert_indices]
+                similarities_to_core, core_index = torch.topk(similarities_to_core, num_groups, dim=-1)
+                print(f"expert {i}, similarities_to_core: {similarities_to_core}, core_index: {core_index}")
+                for index in core_index:
+                    group_of_core = self._group_state_dict[moe_name][core_expert_indices[index]]
+                    if group_member_count[group_of_core] == 1:
+                        most_similar_core = core_expert_indices[index]
+                        break
+                most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
+                self._group_state_dict[moe_name][i] = most_similar_group_label
+                group_member_count[most_similar_group_label] += 1
+                if group_member_count[self._group_state_dict[moe_name][i]] >= self.num_experts:
+                    if len(core_expert_indices) == 1:
+                        raise ValueError(
+                            f"[Merging]The number of groups at layer {layer_idx} is too small!"
+                        )
+                    # Kick out the filled group as well as its core, by pop the core from core_experts
+                    core_index = torch.argmax(similarity_matrix[i, core_expert_indices])
+                    core_expert_indices = torch.cat(
+                        [core_expert_indices[:core_index], core_expert_indices[core_index + 1:]]
+                    )
+            print(f"core expert: {core_experts[moe_name]}")
+            print(f"group: {self._group_state_dict[moe_name]}")
+
+            # 4. Merge -> One group two experts
+            group_labels = self._group_state_dict[moe_name]
+            moe = model.model.layers[layer_idx].block_sparse_moe
+            moe.expert_dict = dict()
+            for label in group_labels.unique():
+                expert_indices = torch.where(group_labels == label)[0].tolist()
+                print(f"group: {label} with experts {expert_indices}")
+                merged_expert = deepcopy(moe.experts[expert_indices[0]])
+                for i in range(self.d_ff):
+                    if pruning_mask[expert_indices[0]][i] == False and pruning_mask[expert_indices[1]][i] == False:
+                        merged_expert.w1.weight[i] = torch.zeros(self.d_model)
+                        merged_expert.w2.weight[:, i] = torch.zeros(self.d_model)
+                        merged_expert.w3.weight[i] = torch.zeros(self.d_model)
+                    elif pruning_mask[expert_indices[0]][i] == False:
+                        merged_expert.w1.weight[i] = moe.experts[expert_indices[1]].w1.weight[i]
+                        merged_expert.w2.weight[:, i] = moe.experts[expert_indices[1]].w2.weight[:, i]
+                        merged_expert.w3.weight[i] = moe.experts[expert_indices[1]].w3.weight[i]
+                    elif pruning_mask[expert_indices[1]][i] == False:
+                        merged_expert.w1.weight[i] = moe.experts[expert_indices[0]].w1.weight[i]
+                        merged_expert.w2.weight[:, i] = moe.experts[expert_indices[0]].w2.weight[:, i]
+                        merged_expert.w3.weight[i] = moe.experts[expert_indices[0]].w3.weight[i]
+                    else:
+                        merged_expert.w1.weight[i] = (moe.experts[expert_indices[0]].w1.weight[i] + moe.experts[expert_indices[1]].w1.weight[i]) / 2
+                        merged_expert.w2.weight[:, i] = (moe.experts[expert_indices[0]].w2.weight[:, i] + moe.experts[expert_indices[1]].w2.weight[:, i]) / 2
+                        merged_expert.w3.weight[i] = (moe.experts[expert_indices[0]].w3.weight[i] + moe.experts[expert_indices[1]].w3.weight[i]) / 2
+
+                moe.experts[expert_indices[0]] = merged_expert
+                moe.experts[expert_indices[1]] = None
+                moe.expert_dict[expert_indices[0]] = expert_indices[0]
+                moe.expert_dict[expert_indices[1]] = expert_indices[0]
+            print(moe.expert_dict)
+            moe.forward = MethodType(merged_moe_forward, moe)
+            model.model.layers[layer_idx].block_sparse_moe = moe
+        self.core_experts = core_experts
+
+        return model
+
+
+            
+
+
+def prune_linear_layer(module, _mask, dim):
+    _device = module.weight.device
 
 def apply_mask(module, _mask):
     # applying masks to the input to compute gradients
