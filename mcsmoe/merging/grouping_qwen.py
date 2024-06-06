@@ -732,3 +732,4 @@ def merge_by_groups_within_and_across_models(
         print("cur: ", cur_indices)
         part_processor(cur_indices)
         print(torch.cuda.memory_summary())
+    return qwen_model
