@@ -28,7 +28,8 @@ def evaluate_mcsmoe(
 ):
     print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
     
-    torch.cuda.memory._record_memory_history()
+    # torch.cuda.memory._record_memory_history()
+    # torch.set_printoptions(threshold=1000000)
     
     eval_ppl = (task == "minipile")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -52,7 +53,7 @@ def evaluate_mcsmoe(
         dataset="c4",
         tokenizer=tokenizer,
         max_block_size=2048,
-        n_blocks_for_stat=128,
+        n_blocks_for_stat=32,
         batch_size=2,
         num_workers=4,
     )

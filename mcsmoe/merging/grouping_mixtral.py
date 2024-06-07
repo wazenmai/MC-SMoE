@@ -762,7 +762,7 @@ class ExpertsGrouperForMixtral(object):
                     input=F.log_softmax(outputs.logits / T, dim=1),
                     target=pred,
                     reduction="batchmean"
-                ) * (T ** 2)
+                ) * (T ** 2) / 100
 
                 if layer_idx >= 1:
                     print(f"kl_div: {kl_div}")
@@ -799,10 +799,10 @@ class ExpertsGrouperForMixtral(object):
                     # get gradient and calculate predictive knowledge
                     grad = moe_masks.grad[e]
                     moe_pred_kl[e] += (grad.detach() ** 2) * 0.5
-
-                    if layer_idx == 1:
-                        print(f"e: {e} {moe_rep_kl[e].shape} {moe_rep_kl[e]}")
-                        print(f"{moe_pred_kl[e].shape} {moe_pred_kl[e]}")
+                    if layer_idx >= 2:
+                        
+                        print(f"r: {e} {moe_rep_kl[e].shape} {moe_rep_kl[e]}")
+                    # print(f"p: {e} {moe_pred_kl[e].shape} {moe_pred_kl[e]}")
                     del _inputs[e][-1], _features, _weight, grad
 
                 moe_masks.grad = None
@@ -1219,7 +1219,6 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:100000]] # forwarded_hidden_states.shape[0] // 40
     forwarded_hidden_states = forwarded_hidden_states.cuda()
     
 
@@ -1510,6 +1509,7 @@ def merge_by_groups_within_and_across_models(
     # mixtral_model.eval().cuda()
 
     def _get_activation_hook(name):
+        #TODO: check if the length is outofbound
         def hook(module, input, output):
             forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
 
