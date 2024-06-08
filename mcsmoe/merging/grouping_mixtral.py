@@ -1169,9 +1169,8 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     average_coefs: Optional[List[float]] = None,
     input_weight: Optional[List[float]] = None,
 ) -> MixtralBlockSparseTop2MLP:
-    
     ffn_list = [ffn.eval() for ffn in ffn_list]
-    # concat_ffn = deepcopy(ffn_list[0])
+    concat_ffn = deepcopy(ffn_list[0])
     d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
     if input_weight is not None:
         average_coefs = []
@@ -1196,59 +1195,64 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0)
     ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=1)
     ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0)
-    # concat_ffn.w1 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
-    # concat_ffn.w2 = torch.nn.Linear(d_ff * num_ffn, d_model, bias=False)
-    # concat_ffn.w3 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
-    # print(f"w1: {concat_ffn.w1.weight.shape}, w2: {concat_ffn.w2.weight.shape}, w3: {concat_ffn.w3.weight.shape}")
-    # concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
-    # print(f"w1: {concat_ffn.w1.weight.shape}, w2: {concat_ffn.w2.weight.shape}, w3: {concat_ffn.w3.weight.shape}")
-    print("modified activation collecting!")
+    concat_ffn.w1 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
+    concat_ffn.w2 = torch.nn.Linear(d_ff * num_ffn, d_model, bias=False)
+    concat_ffn.w3 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
+    concat_ffn.w1.weight.data = ffn_all_w1
+    concat_ffn.w2.weight.data = ffn_all_w2
+    concat_ffn.w3.weight.data = ffn_all_w3
+    concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
+    # print("modified activation collecting!")
 
-    activations_dict = {}
+    # activations_dict = {}
     handles = []
-    # activations = []
-    def get_hook(name):
-        def _activation_hook(module, input, output):
-            # activations.append(input[0].detach().reshape(-1, input[0].shape[-1]))
-            activations_dict[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+    activations = []
+    # def get_hook(name):
+    #     def _activation_hook(module, input, output):
+    #         activations_dict[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+    #     return _activation_hook
+    
+    def _activation_hook(module, input, output):
+        activations.append(input[0].detach().reshape(-1, input[0].shape[-1]))
         return _activation_hook
     
     
-    # handle = concat_ffn.w2.register_forward_hook(_activation_hook) 
+    handle = concat_ffn.w2.register_forward_hook(_activation_hook) 
 
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
-    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states.cuda()
+    # randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
+    # forwarded_hidden_states = forwarded_hidden_states.cuda()
     
 
-    for ffn_idx, ffn in enumerate(ffn_list):
-        ffn = ffn.to(forwarded_hidden_states.device)
-        activations_dict[ffn_idx] = []
-        handles.append(ffn.w2.register_forward_hook(get_hook(ffn_idx)))
+    # for ffn_idx, ffn in enumerate(ffn_list):
+        # ffn = ffn.to(forwarded_hidden_states.device)
+        # activations_dict[ffn_idx] = []
+        # handles.append(ffn.w2.register_forward_hook(get_hook(ffn_idx)))
 
 
     with torch.no_grad():
         for i in range(0, forwarded_hidden_states.shape[0], mini_batch_size):
-            # concat_ffn(forwarded_hidden_states[i:i + mini_batch_size])
-            for ffn_idx, ffn in enumerate(ffn_list):
-                ffn(forwarded_hidden_states[i:i + mini_batch_size])
+            concat_ffn(forwarded_hidden_states[i:i + mini_batch_size])
+            # for ffn_idx, ffn in enumerate(ffn_list):
+                # ffn(forwarded_hidden_states[i:i + mini_batch_size])
     
     for handle in handles:
         handle.remove()
     del handles, forwarded_hidden_states
 
-    print("Concat activations")
+    # print("Concat activations")
 
-    activations = []
-    for i in range(len(activations_dict[0])):
-        concat_tensor = torch.cat([activations_dict[k][i] for k in range(len(activations_dict))], dim=1)
-        activations.append(concat_tensor)
+    # activations = []
+    # for i in range(len(activations_dict[0])):
+    #     concat_tensor = torch.cat([activations_dict[k][i] for k in range(len(activations_dict))], dim=1)
+    #     activations.append(concat_tensor)
 
-    activations = torch.cat(activations, dim=0).cuda()  # (batch_size * seq_len, d_ff * num_ffn)
-    del activations_dict
-    for ffn in ffn_list:
-        ffn = ffn.cpu()
+    # # activations = torch.cat(activations, dim=0).cuda()  # (batch_size * seq_len, d_ff * num_ffn)
+    activations = torch.cat(activations, dim=0)
+    # del activations_dict
+    # for ffn in ffn_list:
+        # ffn = ffn.cpu()
     
     print("activations: ", activations.shape)
 
@@ -1331,10 +1335,10 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     merged_ffn.w2.weight.data = ffn_all_w2
     merged_ffn.w3.weight.data = ffn_all_w3
 
-    for ffn in ffn_list:
-        del ffn
+    # for ffn in ffn_list:
+    #     del ffn
 
-    del ffn_all_w1, ffn_all_w2, ffn_all_w3, ffn_list
+    # del ffn_all_w1, ffn_all_w2, ffn_all_w3, ffn_list
 
     return merged_ffn
 
@@ -1355,7 +1359,7 @@ def _merge_moe_experts_within_and_across_models(
     # p = 0
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
-        print("\nexpert_indices: ", expert_indices)
+        print(f"\nexpert_indices: {len(expert_indices)} {expert_indices}")
 
         if dominant_alone:
             group_core_expert_indices = torch.stack([
@@ -1426,9 +1430,9 @@ def _merge_moe_experts_within_and_across_models(
                     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                     input_weight=input_weight,
                 )
-        moe.experts[expert_indices[0]].w1.weight.copy_(merged_expert.w1.weight)
-        moe.experts[expert_indices[0]].w2.weight.copy_(merged_expert.w2.weight)
-        moe.experts[expert_indices[0]].w3.weight.copy_(merged_expert.w3.weight)
+        moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
+        moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
+        moe.experts[expert_indices[0].item()].w3.weight.copy_(merged_expert.w3.weight)
         
         moe.expert_dict[expert_indices[0].item()] = expert_indices[0].item()
 
@@ -1511,8 +1515,7 @@ def merge_by_groups_within_and_across_models(
     def _get_activation_hook(name):
         #TODO: check if the length is outofbound
         def hook(module, input, output):
-            forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
-
+            forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1])) # .cpu()
         return hook
     
     # Since OOM, We can devide it into 2 parts
@@ -1585,7 +1588,7 @@ def merge_by_groups_within_and_across_models(
                 usage_frequencies=usage_frequencies[ffn_name] if usage_weighted else None,
             )
             del layer_forwarded_hidden_states
-            
+
     
     print(grouper.sparse_layer_indices)
     partition_num = len(grouper.sparse_layer_indices) // partition

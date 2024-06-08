@@ -44,7 +44,7 @@ def evaluate_mcsmoe(
         dataset="c4",
         tokenizer=tokenizer,
         max_block_size=2048,
-        n_blocks_for_stat=128,
+        n_blocks_for_stat=32, # 128, reduce size to avoid OOM
         batch_size=eval_batch_size,
         num_workers=4,
     )

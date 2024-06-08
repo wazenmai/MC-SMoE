@@ -318,7 +318,8 @@ class ExpertsGrouperForQwen2MoE(object):
         handles = []
         def _get_activation_hook(name):
             def hook(module, input, output):
-                forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+                # forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+                forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1]))
             return hook
         
         for layer_idx in tqdm(
@@ -422,22 +423,40 @@ def merge_qwen_moe_by_activation_matching_within_and_across_models(
             f"but got {len(average_coefs)}."
         )
     num_ffn = len(ffn_list)
-    # if len(forwarded_hidden_states) == 0 or len(forwarded_hidden_states) == 1:
-        # return concat_ffn
+    if len(forwarded_hidden_states) == 0 or len(forwarded_hidden_states) == 1:
+        return concat_ffn
     if mini_batch_size is None:
         mini_batch_size = forwarded_hidden_states.shape[0]
 
     ffn_all_gate_proj = torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0)
     ffn_all_down_proj = torch.cat([ffn.down_proj.weight.data for ffn in ffn_list], dim=1)
     ffn_all_up_proj = torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0)
-    # concat_ffn.gate_proj = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
-    # concat_ffn.down_proj = torch.nn.Linear(d_ff * num_ffn, d_model, bias=False)
-    # concat_ffn.up_proj = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
-    # concat_ffn.gate_proj.weight.data = ffn_all_gate_proj.to(torch.float)
-    # concat_ffn.down_proj.weight.data = ffn_all_down_proj.to(torch.float)
-    # concat_ffn.up_proj.weight.data = ffn_all_up_proj.to(torch.float)
-    # concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
+    concat_ffn.gate_proj = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
+    concat_ffn.down_proj = torch.nn.Linear(d_ff * num_ffn, d_model, bias=False)
+    concat_ffn.up_proj = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
+    concat_ffn.gate_proj.weight.data = ffn_all_gate_proj
+    concat_ffn.down_proj.weight.data = ffn_all_down_proj
+    concat_ffn.up_proj.weight.data = ffn_all_up_proj
+    concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
+    activations = []
+    
+    def _activation_hook(module, input, output):
+        activations.append(input[0].detach().reshape(-1, input[0].shape[-1]))
+        return _activation_hook
+    
+    print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
+
+    handle = concat_ffn.down_proj.register_forward_hook(_activation_hook)
+
+    for i in range(0, forwarded_hidden_states.shape[0], mini_batch_size):
+        concat_ffn(forwarded_hidden_states[i:i + mini_batch_size])
+    
+    handle.remove()
+    del handle, forwarded_hidden_states
+
+    # Modified version for moving data to cpu
+    """
     activations_dict = {}
     handles = []
     def get_hook(name):
@@ -479,6 +498,9 @@ def merge_qwen_moe_by_activation_matching_within_and_across_models(
     for ffn in ffn_list:
         ffn = ffn.cpu()
     print("activations: ", activations.shape)
+    """
+
+    activations = torch.cat(activations, dim=0)  # (batch_size * seq_len, d_ff * num_ffn)
 
     # Initialize the correlation matrix
     mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
@@ -654,8 +676,8 @@ def merge_by_groups_within_and_across_models(
 
         def _get_activation_hook(name):
             def hook(module, input, output):
-                forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
-
+                # forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+                forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1]))
             return hook
         
         for layer_idx in tqdm(
@@ -705,7 +727,8 @@ def merge_by_groups_within_and_across_models(
                                 if expert_idx == ind:
                                     batch_tensor[j] = True
                                     router_weight.append(router_weights[ffn_name][i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).cpu().to(forwarded_hidden_states[ffn_name][i].dtype)
+                        # router_weight = torch.tensor(router_weight).unsqueeze(1).cpu().to(forwarded_hidden_states[ffn_name][i].dtype)
+                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].dtype)
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
                     else:
                         for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
