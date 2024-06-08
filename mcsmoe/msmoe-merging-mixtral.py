@@ -111,7 +111,7 @@ def evaluate_mcsmoe(
     #     usage_weighted=False
     # )
 
-    dom_experts = grouper.core_experts
+    # dom_experts = grouper.core_experts
 
     print(f"[MC-SMoE] ========= Grouping results ========= ")
     for name, state in grouper.group_state_dict().items():
@@ -140,7 +140,7 @@ def evaluate_mcsmoe(
     else:
         for t in task:
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", eval_batch_size=eval_batch_size, log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, output_path=output_path+f"/{t}", eval_batch_size=eval_batch_size, log=True
             )
 
 

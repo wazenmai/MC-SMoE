@@ -790,7 +790,11 @@ class ExpertsGrouperForMixtral(object):
                     # get feature
                     token_id = (expert_index == e).nonzero()
                     number_of_tokens = token_id.shape[0]
-                    _features = _inputs[e][-1][:number_of_tokens].cuda()
+                    _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).cuda()
+                    # for dim1 in range(_features.shape[0]):
+                    #     for dim2 in range(_features.shape[1]):
+                    #         if _features[dim1][dim2] >= 1:
+                    #             _features[dim1][dim2] = 0.9999
 
                     # get weight and calculate representational knowledge
                     _weight = model.model.layers[layer_idx].block_sparse_moe.experts[e].w2.weight
@@ -800,8 +804,15 @@ class ExpertsGrouperForMixtral(object):
                     grad = moe_masks.grad[e]
                     moe_pred_kl[e] += (grad.detach() ** 2) * 0.5
                     if layer_idx >= 2:
-                        
-                        print(f"r: {e} {moe_rep_kl[e].shape} {moe_rep_kl[e]}")
+                        square = (_features ** 2)
+                        temp = (_features ** 2).sum(dim=0)
+                        if torch.isinf(temp).any():
+                            dim = (temp == float('inf')).nonzero(as_tuple=True)[0]
+                            print(f"inf dim: {e} {dim}")
+                            print(f"f: {e} {dim} {_features.shape} {_features[:, dim]} max={torch.max(_features[:, dim])}")
+                            print(f"square: {e} {dim} {square.shape} {square[:, dim]} max={torch.max(square[:, dim])} {square[:, dim[0]].sum(dim=0)}")
+                            print(f"temp: {e} {temp.shape}")
+                        # print(f"r: {e} {moe_rep_kl[e].shape} {moe_rep_kl[e]}")
                     # print(f"p: {e} {moe_pred_kl[e].shape} {moe_pred_kl[e]}")
                     del _inputs[e][-1], _features, _weight, grad
 
@@ -1201,7 +1212,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     concat_ffn.w1.weight.data = ffn_all_w1
     concat_ffn.w2.weight.data = ffn_all_w2
     concat_ffn.w3.weight.data = ffn_all_w3
-    concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
+    # concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     # print("modified activation collecting!")
 
     # activations_dict = {}
@@ -1221,8 +1232,10 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
 
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
-    # randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    # forwarded_hidden_states = forwarded_hidden_states.cuda()
+    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
+    forwarded_hidden_states = forwarded_hidden_states.cuda()
+    concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
 
     # for ffn_idx, ffn in enumerate(ffn_list):
@@ -1588,6 +1601,7 @@ def merge_by_groups_within_and_across_models(
                 usage_frequencies=usage_frequencies[ffn_name] if usage_weighted else None,
             )
             del layer_forwarded_hidden_states
+            print(torch.cuda.memory_summary())
 
     
     print(grouper.sparse_layer_indices)
