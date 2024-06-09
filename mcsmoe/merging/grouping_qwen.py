@@ -1,6 +1,7 @@
 import os
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
+from types import MethodType
 
 import torch
 from torch.nn import functional as F
@@ -671,7 +672,7 @@ def merge_by_groups_within_and_across_models(
     num_experts = grouper.num_experts
 
     def part_processor(sparse_layer_indices):
-        qwen_model.eval().cuda()
+        qwen_model.eval() #.cuda()
         handles = []
 
         def _get_activation_hook(name):
@@ -732,7 +733,7 @@ def merge_by_groups_within_and_across_models(
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
                     else:
                         for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-                            if expert_index in router_indices[ffn_name][i][j]:
+                            if expert_idx in router_indices[ffn_name][i][j]:
                                 batch_tensor[j] = True
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor])
                 layer_forwarded_hidden_states += (

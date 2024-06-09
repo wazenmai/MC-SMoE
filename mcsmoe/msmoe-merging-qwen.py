@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # @Author: pingzhili
 # @Time: 2024/2/18
+import os
 from typing import Optional
 
 import logging
@@ -67,24 +68,25 @@ def evaluate_mcsmoe(
             num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
         )
         # freq merge
-        # model = merge_by_groups_with_usage_weighted(
-        #     model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
-        # )
-        # zipit merge
-        model = merge_by_groups_within_and_across_models(
-            mixtral_model=model,
-            grouper=grouper,
-            dataloader=dataloader_for_merging,
-            mode=mode,
-            dominant_alone=False,
-            usage_weighted=False
+        model = merge_by_groups_with_usage_weighted(
+            model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
         )
+        # zipit merge
+        # model = merge_by_groups_within_and_across_models(
+        #     qwen_model=model,
+        #     grouper=grouper,
+        #     dataloader=dataloader_for_merging,
+        #     mode=mode,
+        #     dominant_alone=False,
+        #     usage_weighted=False
+        # )
     else:
         raise ValueError(f"Unknown dominant type: {dominant}")
     
 
 
     print(f"[MC-SMoE] ========= Grouping results ========= ")
+    breakpoint()
     for name, state in grouper.group_state_dict().items():
         if dom_experts is None:
             print(f"Group {name}: {state.tolist()}")
@@ -92,7 +94,7 @@ def evaluate_mcsmoe(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
 
     del grouper
-    model = model.cuda()
+    # model = model.cuda()
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):
