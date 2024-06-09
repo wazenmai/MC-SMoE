@@ -177,3 +177,4 @@ log_*
 log
 *.pickle
 *temp*.py
+try.py

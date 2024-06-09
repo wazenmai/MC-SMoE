@@ -879,7 +879,7 @@ class ExpertsGrouperForMixtral(object):
                                 if expert_idx == ind:
                                     batch_tensor[j] = True
                                     router_weight.append(router_weights[i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).cpu().to(forwarded_hidden_states[i].dtype)
+                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[i].dtype) # .cpu()
                         hidden_states_list.append(forwarded_hidden_states[i][batch_tensor] * router_weight)
                     else:
                         for j in range(len(forwarded_hidden_states[i])): # one token
@@ -1533,7 +1533,7 @@ def merge_by_groups_within_and_across_models(
     
     # Since OOM, We can devide it into 2 parts
     def part_processor(sparse_layer_indices):
-        mixtral_model.eval().cuda()
+        mixtral_model.eval() # .cuda()
         handles = []
         for layer_idx in tqdm(
                 sparse_layer_indices,
@@ -1581,7 +1581,7 @@ def merge_by_groups_within_and_across_models(
                                 if expert_idx == ind:
                                     batch_tensor[j] = True
                                     router_weight.append(router_weights[ffn_name][i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).cpu().to(forwarded_hidden_states[ffn_name][i].dtype)
+                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].dtype) # .cpu()
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
                     else:
                         for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
