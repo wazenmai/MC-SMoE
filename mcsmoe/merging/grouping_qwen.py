@@ -370,25 +370,25 @@ def _merge_mlp_experts_by_usage_frequency_weighting(
 ) -> Qwen2MoeSparseMoeBlock:
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
-        w1_weight_list = torch.stack(
-            [ffn.experts[expert_idx].w1.weight * usage_frequencies[expert_idx]
+        gate_proj_weight_list = torch.stack(
+            [ffn.experts[expert_idx].gate_proj.weight * usage_frequencies[expert_idx]
              for expert_idx in expert_indices], dim=0
         )
-        w2_weight_list = torch.stack(
-            [ffn.experts[expert_idx].w2.weight * usage_frequencies[expert_idx]
+        down_proj_weight_list = torch.stack(
+            [ffn.experts[expert_idx].down_proj.weight * usage_frequencies[expert_idx]
              for expert_idx in expert_indices], dim=0
         )
-        w3_weight_list = torch.stack(
-            [ffn.experts[expert_idx].w3.weight * usage_frequencies[expert_idx]
+        up_proj_weight_list = torch.stack(
+            [ffn.experts[expert_idx].up_proj.weight * usage_frequencies[expert_idx]
              for expert_idx in expert_indices], dim=0
         )
-        w1_weight = torch.sum(w1_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        w2_weight = torch.sum(w2_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        w3_weight = torch.sum(w3_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+        gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+        down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+        up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
 
-        ffn.experts[expert_indices[0]].w1.weight.copy_(w1_weight)
-        ffn.experts[expert_indices[0]].w2.weight.copy_(w2_weight)
-        ffn.experts[expert_indices[0]].w3.weight.copy_(w3_weight)
+        ffn.experts[expert_indices[0]].gate_proj.weight.copy_(gate_proj_weight)
+        ffn.experts[expert_indices[0]].down_proj.weight.copy_(down_proj_weight)
+        ffn.experts[expert_indices[0]].up_proj.weight.copy_(up_proj_weight)
 
         for expert_idx in expert_indices[1:]:
             # Binding merged experts to the first of them
