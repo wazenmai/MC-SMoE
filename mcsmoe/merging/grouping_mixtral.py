@@ -1,5 +1,6 @@
 import gc
 import os
+import time
 from copy import deepcopy
 from pickle import dump
 from types import MethodType
@@ -546,7 +547,7 @@ class ExpertsGrouperForMixtral(object):
         handles = []
         def _get_activation_hook(name):
             def hook(module, input, output):
-                forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+                forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1])) # .cpu()
             return hook
         
         for layer_idx in tqdm(
@@ -574,7 +575,7 @@ class ExpertsGrouperForMixtral(object):
 
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by expert outputs..."):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
-            layer_input = torch.cat(forwarded_hidden_states[ffn_name]).cuda()
+            layer_input = torch.cat(forwarded_hidden_states[ffn_name]) # .cuda()
             expert_outputs = [] # (E, #T, D) -> average -> (E, D)
             with torch.no_grad():
                 for i in range(self.num_experts):
@@ -705,7 +706,7 @@ class ExpertsGrouperForMixtral(object):
             
             # STEP: 2. Compute knowledge + Collect activation for zipit merging
             # 2.1 Initialization
-            model.eval().cuda()
+            model.eval() # .cuda()
             for name, p in model.named_parameters():
                 if p.requires_grad_:
                     p.requires_grad_(False)
@@ -929,7 +930,7 @@ class ExpertsGrouperForMixtral(object):
             
             # 1. Compute knowledge
 
-            model.eval().cuda()
+            model.eval() # .cuda()
             for name, p in model.named_parameters():
                 p.requires_grad_(False)
             moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
@@ -1234,7 +1235,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
     forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
-    forwarded_hidden_states = forwarded_hidden_states.cuda()
+    forwarded_hidden_states = forwarded_hidden_states # .cuda()
     concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
 
@@ -1267,7 +1268,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     # for ffn in ffn_list:
         # ffn = ffn.cpu()
     
-    print("activations: ", activations.shape)
+    print(f"Collected activations: {activations.shape}")
 
     # Initialize the correlation matrix
     mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
@@ -1289,7 +1290,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     # print(torch.cuda.memory_summary())
 
     corr_matrix[torch.arange(d_ff * num_ffn), torch.arange(d_ff * num_ffn)] = -1  # Remove self-correlation
-    # print(corr_matrix.shape)
+    print(f"corr_matrix: {corr_matrix.shape}, time: {time.ctime(time.time())}")
 
     # Greedy Merging!
     while ffn_all_w1.shape[0] > d_ff:
@@ -1372,7 +1373,7 @@ def _merge_moe_experts_within_and_across_models(
     # p = 0
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
-        print(f"\nexpert_indices: {len(expert_indices)} {expert_indices}")
+        print(f"\nexpert_indices: {len(expert_indices)} {expert_indices}, {time.ctime(time.time())}")
 
         if dominant_alone:
             group_core_expert_indices = torch.stack([
@@ -1533,7 +1534,7 @@ def merge_by_groups_within_and_across_models(
     
     # Since OOM, We can devide it into 2 parts
     def part_processor(sparse_layer_indices):
-        mixtral_model.eval().cuda()
+        mixtral_model.eval() # .cuda()
         handles = []
         for layer_idx in tqdm(
                 sparse_layer_indices,
