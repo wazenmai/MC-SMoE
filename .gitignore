@@ -178,3 +178,4 @@ log
 *.pickle
 *temp*.py
 try.py
+mcsmoe/pruning/kprune.py
