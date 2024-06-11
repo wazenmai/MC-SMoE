@@ -21,6 +21,6 @@ services:
       TOKENIZERS_PARALLELISM: "false"
     command:
       - bash
-      - scripts/mixtral/run.sh
+      - scripts/mixtral/merge.sh
       
           
