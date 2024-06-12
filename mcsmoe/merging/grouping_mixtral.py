@@ -1582,7 +1582,7 @@ def merge_by_groups_within_and_across_models(
                                 if expert_idx == ind:
                                     batch_tensor[j] = True
                                     router_weight.append(router_weights[ffn_name][i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].dtype) # .cpu()
+                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].dtype).to(forwarded_hidden_states[ffn_name][i].device) # .cpu()
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
                     else:
                         for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
