@@ -4,7 +4,8 @@
 
 # dominant:         random, frequency, knowledge
 # similarity_base:  weight, router-weight, router-logits, expert-output
-# zipit merge mode: normal, activation-with-router-logits, input-weight, learnable weight
+# zipit merge mode: normal (default), activation-with-router-logits, input-weight, learnable weight
+# merge:            zipit (default), freq
 # task: winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte,
 
 
@@ -18,6 +19,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="router-logits" \
   --mode="normal" \
+  --merge="freq" \
   --num_average_groups=6 \
   --n_sentences=32 \
   --train_batch_size=4 \
@@ -32,6 +34,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="weight" \
   --mode="normal" \
+  --merge="freq" \
   --num_average_groups=6 \
   --n_sentences=32 \
   --train_batch_size=4 \
@@ -46,6 +49,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="expert-output" \
   --mode="normal" \
+  --merge="freq" \
   --num_average_groups=6 \
   --n_sentences=32 \
   --train_batch_size=4 \
@@ -60,6 +64,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="router-logits" \
   --mode="normal" \
+  --merge="freq" \
   --num_average_groups=6 \
   --n_sentences=128 \
   --train_batch_size=4 \
@@ -74,6 +79,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="weight" \
   --mode="normal" \
+  --merge="freq" \
   --num_average_groups=6 \
   --n_sentences=128 \
   --train_batch_size=4 \
@@ -88,6 +94,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="expert-output" \
   --mode="normal" \
+  --merge="freq" \
   --num_average_groups=6 \
   --n_sentences=128 \
   --train_batch_size=4 \

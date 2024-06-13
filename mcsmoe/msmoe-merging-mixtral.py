@@ -23,6 +23,7 @@ def evaluate_mcsmoe(
         dominant: Optional[str] = "knowledge", # random, frequency, knowledge
         similarity_base: Optional[str] = "router-logits",
         mode: Optional[str] = "normal", 
+        merge: Optional[str] = "zipit", # zipit, freq
         num_fewshot: Optional[int] = 0,
         n_sentences: Optional[int] = 32,
         train_batch_size: Optional[int] = 4,
@@ -75,18 +76,20 @@ def evaluate_mcsmoe(
         dom_experts = grouper.group_experts_globally_from_dominant_experts(
             num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
         )
-        model = merge_by_groups_with_usage_weighted(
-            model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
-        )
-        # model = merge_by_groups_within_and_across_models(
-        #     mixtral_model=model,
-        #     grouper=grouper,
-        #     dataloader=dataloader_for_merging,
-        #     mode=mode,
-        #     partition=partition,
-        #     dominant_alone=False,
-        #     usage_weighted=False
-        # )
+        if merge == "freq":
+            model = merge_by_groups_with_usage_weighted(
+                model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+            )
+        else:
+            model = merge_by_groups_within_and_across_models(
+                mixtral_model=model,
+                grouper=grouper,
+                dataloader=dataloader_for_merging,
+                mode=mode,
+                partition=partition,
+                dominant_alone=False,
+                usage_weighted=False
+            )
     elif dominant == "knowledge":
         model = grouper.all_in_one_knowledge_dominant(
             model=model, 

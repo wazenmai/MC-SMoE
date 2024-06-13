@@ -5,6 +5,7 @@
 # dominant:         random, frequency, knowledge
 # similarity_base:  weight, router-weight, router-logits, expert-output
 # zipit merge mode: normal, activation-with-router-logits, input-weight, learnable weight
+# merge:            zipit, freq
 # task: winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte,
 
 
