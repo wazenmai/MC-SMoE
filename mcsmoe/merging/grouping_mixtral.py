@@ -1234,7 +1234,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:10000]]
     forwarded_hidden_states = forwarded_hidden_states # .cuda()
     concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
