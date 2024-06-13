@@ -605,7 +605,7 @@ def _merge_moe_experts_within_and_across_models(
         group_forwarded_hidden_states = torch.cat([
             forwarded_hidden_states[expert_idx] for expert_idx in expert_indices
         ], dim=0)
-        if len(expert_indices == 1):
+        if len(expert_indices) == 1:
             merged_expert = moe.experts[expert_indices[0]]
         else:
             merged_expert = merge_qwen_moe_by_activation_matching_within_and_across_models(
