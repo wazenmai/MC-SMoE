@@ -597,7 +597,9 @@ def _merge_moe_experts_within_and_across_models(
             input_weight = []
             for expert_idx in expert_indices:
                 input_weight.append(forwarded_hidden_states[expert_idx].shape[0])
-            input_weight /= sum(input_weight)
+            s = sum(input_weight)
+            input_weight = [w / s for w in input_weight]
+            # input_weight /= sum(input_weight)
 
         # not dominant
         group_forwarded_hidden_states = torch.cat([
@@ -729,7 +731,7 @@ def merge_by_groups_within_and_across_models(
                                     batch_tensor[j] = True
                                     router_weight.append(router_weights[ffn_name][i][j][r])
                         # router_weight = torch.tensor(router_weight).unsqueeze(1).cpu().to(forwarded_hidden_states[ffn_name][i].dtype)
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].dtype)
+                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i])
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
                     else:
                         for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token

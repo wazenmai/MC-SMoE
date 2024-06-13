@@ -2,6 +2,7 @@
 # @Author: pingzhili
 # @Time: 2024/2/18
 import os
+import gc
 from typing import Optional
 
 import logging
@@ -46,7 +47,7 @@ def evaluate_mcsmoe(
         tokenizer=tokenizer,
         max_block_size=2048,
         n_blocks_for_stat=32, # 128, reduce size to avoid OOM
-        batch_size=eval_batch_size,
+        batch_size=1,
         num_workers=4,
     )
 
@@ -68,30 +69,29 @@ def evaluate_mcsmoe(
             num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
         )
         # freq merge
-        model = merge_by_groups_with_usage_weighted(
-            model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
-        )
-        # zipit merge
-        # model = merge_by_groups_within_and_across_models(
-        #     qwen_model=model,
-        #     grouper=grouper,
-        #     dataloader=dataloader_for_merging,
-        #     mode=mode,
-        #     dominant_alone=False,
-        #     usage_weighted=False
+        # model = merge_by_groups_with_usage_weighted(
+        #     model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
         # )
+        # zipit merge
+        model = merge_by_groups_within_and_across_models(
+            qwen_model=model,
+            grouper=grouper,
+            dataloader=dataloader_for_merging,
+            mode=mode,
+            dominant_alone=False,
+            usage_weighted=False
+        )
     else:
         raise ValueError(f"Unknown dominant type: {dominant}")
     
 
 
     print(f"[MC-SMoE] ========= Grouping results ========= ")
-    breakpoint()
-    for name, state in grouper.group_state_dict().items():
-        if dom_experts is None:
-            print(f"Group {name}: {state.tolist()}")
-        else:
-            print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
+    # for name, state in grouper.group_state_dict().items():
+    #     if dom_experts is None:
+    #         print(f"Group {name}: {state.tolist()}")
+    #     else:
+    #         print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
 
     del grouper
     # model = model.cuda()
@@ -114,6 +114,8 @@ def evaluate_mcsmoe(
             evaluate_fewshot(
                 model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", eval_batch_size=eval_batch_size, log=True
             )
+            gc.collect()
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
