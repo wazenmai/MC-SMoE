@@ -1234,7 +1234,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:10000]]
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
     forwarded_hidden_states = forwarded_hidden_states # .cuda()
     concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
@@ -1272,22 +1272,15 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
 
     # Initialize the correlation matrix
     mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
-    # print("mean: ", mean.shape)
     std = activations.std(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
     covar = torch.mm(
         (activations - mean).t(),
         (activations - mean)
     ) / (activations.shape[0] - 1)  # (d_ff * num_ffn, d_ff * num_ffn)
-    # print("covar: ", covar.shape)
-    # del activations, mean
     corr_matrix = covar / (std.t() * std + FP32_EPS)  # (d_ff * num_ffn, d_ff * num_ffn)
-    # print("corr_matrix: ", corr_matrix.shape)
-    # print(torch.arange(d_ff * num_ffn))
 
     del activations, covar, std, mean
-    # gc.collect()
     torch.cuda.empty_cache()
-    # print(torch.cuda.memory_summary())
 
     corr_matrix[torch.arange(d_ff * num_ffn), torch.arange(d_ff * num_ffn)] = -1  # Remove self-correlation
     print(f"corr_matrix: {corr_matrix.shape}, time: {time.ctime(time.time())}")
