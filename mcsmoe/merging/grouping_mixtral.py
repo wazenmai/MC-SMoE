@@ -831,7 +831,7 @@ class ExpertsGrouperForMixtral(object):
             print(f"\nmoe_scores: {moe_scores}")
             if layer_idx == 0:
                 kd_labels = torch.cat(kd_labels, dim=0)
-                print(f"kd_labels: {kd_labels.shape} {kd_labels}")
+                print(f"kd_labels: {kd_labels.shape}")
 
             for handle in handles:
                 handle.remove()
@@ -1234,7 +1234,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]] # token * hidden_size = 50000 * 14336
     forwarded_hidden_states = forwarded_hidden_states # .cuda()
     concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
@@ -1245,11 +1245,10 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
         # handles.append(ffn.w2.register_forward_hook(get_hook(ffn_idx)))
 
 
-    with torch.no_grad():
-        for i in range(0, forwarded_hidden_states.shape[0], mini_batch_size):
-            concat_ffn(forwarded_hidden_states[i:i + mini_batch_size])
-            # for ffn_idx, ffn in enumerate(ffn_list):
-                # ffn(forwarded_hidden_states[i:i + mini_batch_size])
+    for i in range(0, forwarded_hidden_states.shape[0], mini_batch_size): # mini_batch_size = 10000
+        concat_ffn(forwarded_hidden_states[i:i + mini_batch_size])  # mini_batch_size * 14336 -> activation: mini_batch_size * 32768 * num_ffn
+        # for ffn_idx, ffn in enumerate(ffn_list):
+            # ffn(forwarded_hidden_states[i:i + mini_batch_size])
     
     for handle in handles:
         handle.remove()
@@ -1274,10 +1273,11 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
     std = activations.std(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
     covar = torch.mm(
-        (activations - mean).t(),
+        (activations - mean).t(), # (50000,  32768 * num_ffn)
         (activations - mean)
     ) / (activations.shape[0] - 1)  # (d_ff * num_ffn, d_ff * num_ffn)
     corr_matrix = covar / (std.t() * std + FP32_EPS)  # (d_ff * num_ffn, d_ff * num_ffn)
+    # print(torch.cuda.memory_summary())
 
     del activations, covar, std, mean
     torch.cuda.empty_cache()
