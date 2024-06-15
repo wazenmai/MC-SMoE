@@ -592,13 +592,14 @@ def _merge_moe_experts_within_and_across_models(
 
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
-
+        print(f"Group {label}: {expert_indices}")
         if mode == "input-weight":
             input_weight = []
             for expert_idx in expert_indices:
                 input_weight.append(forwarded_hidden_states[expert_idx].shape[0])
             s = sum(input_weight)
             input_weight = [w / s for w in input_weight]
+            print(f"Input weight: {input_weight}")
             # input_weight /= sum(input_weight)
 
         # not dominant

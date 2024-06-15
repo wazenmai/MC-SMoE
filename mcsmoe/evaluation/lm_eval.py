@@ -46,7 +46,6 @@ def evaluate_fewshot(
         eval_batch_size: Optional[int] = 4,
         log: Optional[bool] = True,
         output_path: Optional[str] = None,
-        eval_batch_size: Optional[int] = 1,
 ):
     # initialize_tasks(verbosity="WARNING")
     lm = HFLM(
