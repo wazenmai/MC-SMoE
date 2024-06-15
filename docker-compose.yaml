@@ -1,10 +1,13 @@
 version: '3.8'
 services:
-  lm-finetune:
+  mc-smoe:
     image: wazenmai/mc-smoe:latest
-    build: .
-
-    # need version '3.8'
+    build:
+      context: .
+    container_name: mc-smoe
+    volumes:
+      - /home/ubuntu/warehouse/huggingface:/app/warehouse/huggingface
+      - /home/ubuntu/warehouse/results:/app/results
     deploy:
       resources:
         reservations:
@@ -12,24 +15,12 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    network_mode: host
-
-    # need version '2.3'
-    # runtime: nvidia
-
-    # volumes:
-      # TODO: replace /home/wazenmai/Warehouse/MoE/models/ to the model path
-      # - /home/wazenmai/Warehouse/MoE/models/:/models/
-      # - /home/wazenmai/MoE_experiments/lm-evaluation-harness/results:/app/results
-      # - /mnt/nfs/wazenmai/results/not_all_experts_are_equal/:/models/
-      # - ./results:/home/wazenmai/MoE_experiment/lm-evaluation-harness/results
-      # - ./sqlite_cache:/home/wazenmai/MoE_experiments/lm-evaluation-harness/sqlite_cache
-    
-    # TODO: replace /models/pythia-14m to the model path
-    # command: tail -f /dev/null
-    # command: bash -c "python3 mcsmoe/save_model.py"
-    # command: bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --config_file static/finetune_config.yaml mcsmoe/finetune-switch-transformers.py --per_device_train_batch_size=8 --per_device_eval_batch_size=64 --gradient_accumulation_steps=1 --num_epochs=20 --report=False --no_eval_until_epochs=1 --save_each_epoch=False --preprocessing_num_workers=8 --num_experts=32 --task=mrpc --learning_rate=3e-5 --warmup_steps=16 --output_dir=/app/results/switch-32e-mrpc --checkpoint=/home/wazenmai/Storage/cache/huggingface/hub/models--google--switch-base-32/snapshots/2018338b8dad760fa7a35a754d532486ef3942f9/"
-    command: bash -c "CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch --config_file static/finetune_config.yaml mcsmoe/finetune-switch-transformers.py --per_device_train_batch_size=8 --per_device_eval_batch_size=64 --gradient_accumulation_steps=1 --num_epochs=20 --report=False --no_eval_until_epochs=1 --save_each_epoch=False --preprocessing_num_workers=8 --num_experts=32 --task=mrpc --learning_rate=3e-5 --warmup_steps=16 --output_dir=/app/results/switch-32e-mrpc"
-# command: bash -c "lm_eval --model hf --model_args pretrained=/models/mixtral-8x7B_layerwise_pruning_r6_c4_128_20240330-160959,dtype=bfloat16 --tasks boolq,rte,arc_challenge,arc_easy,hellaswag,winogrande,openbookqa,gsm8k,mmlu --device cuda --batch_size 16 --output_path ./results --log_samples --use_cache ./sqlite_cache/ |& tee log"
+    environment:
+      HF_HOME: "/app/warehouse/huggingface"
+      NCCL_P2P_DISABLE: "1"
+      TOKENIZERS_PARALLELISM: "false"
+    command:
+      - bash
+      - scripts/mixtral/freq-merge.sh
       
           

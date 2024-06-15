@@ -2,6 +2,7 @@
 # @Author: pingzhili
 # @Time: 2024/2/18
 from typing import Optional
+# from huggingface_hub import login
 
 import os
 import logging
@@ -13,6 +14,7 @@ from mcsmoe.evaluation import get_minipile_dataloder, evaluate_minipile_perplexi
 from mcsmoe.merging.grouping_mixtral import ExpertsGrouperForMixtral, merge_by_groups_with_usage_weighted, merge_by_groups_within_and_across_models
 
 logger = logging.getLogger(__name__)
+# login(token="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")
 
 def evaluate_mcsmoe(
         task: str,
@@ -21,7 +23,10 @@ def evaluate_mcsmoe(
         dominant: Optional[str] = "knowledge", # random, frequency, knowledge
         similarity_base: Optional[str] = "router-logits",
         mode: Optional[str] = "normal", 
+        merge: Optional[str] = "zipit", # zipit, freq
         num_fewshot: Optional[int] = 0,
+        n_sentences: Optional[int] = 32,
+        train_batch_size: Optional[int] = 4,
         eval_batch_size: Optional[int] = 32,
         partition: Optional[int] = 1,
         output_path: Optional[str] = None,
@@ -53,8 +58,8 @@ def evaluate_mcsmoe(
         dataset="c4",
         tokenizer=tokenizer,
         max_block_size=2048,
-        n_blocks_for_stat=128,
-        batch_size=eval_batch_size,
+        n_blocks_for_stat=n_sentences, # 32, 128
+        batch_size=train_batch_size,
         num_workers=4,
     )
 
@@ -71,15 +76,20 @@ def evaluate_mcsmoe(
         dom_experts = grouper.group_experts_globally_from_dominant_experts(
             num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
         )
-        model = merge_by_groups_within_and_across_models(
-            mixtral_model=model,
-            grouper=grouper,
-            dataloader=dataloader_for_merging,
-            mode=mode,
-            partition=partition,
-            dominant_alone=False,
-            usage_weighted=False
-        )
+        if merge == "freq":
+            model = merge_by_groups_with_usage_weighted(
+                model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+            )
+        else:
+            model = merge_by_groups_within_and_across_models(
+                mixtral_model=model,
+                grouper=grouper,
+                dataloader=dataloader_for_merging,
+                mode=mode,
+                partition=partition,
+                dominant_alone=False,
+                usage_weighted=False
+            )
     elif dominant == "knowledge":
         model = grouper.all_in_one_knowledge_dominant(
             model=model, 
@@ -123,9 +133,6 @@ def evaluate_mcsmoe(
     del grouper
 
     model = model.cuda()
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    torch.save(model.state_dict(), output_path + "/model.pt")
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):
@@ -143,7 +150,7 @@ def evaluate_mcsmoe(
     else:
         for t in task:
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, output_path=output_path+f"/{t}", eval_batch_size=eval_batch_size, log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_batch_size, log=True
             )
 
 

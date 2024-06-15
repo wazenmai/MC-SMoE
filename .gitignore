@@ -180,3 +180,5 @@ log
 
 mcsmoe/data/c4*.json
 .deepspeed_env
+try.py
+mcsmoe/pruning/kprune.py
