@@ -197,7 +197,6 @@ class ExpertsGrouperForMixtral(object):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
             num_groups = num_groups_per_layer[ffn_name]
             indices_sorted_by_usage = torch.argsort(self._usage_frequency_state_dict[ffn_name], descending=True)
-
             # 1 Assign top-K most-used experts with label 0 to K-1 respectively
             core_expert_indices = indices_sorted_by_usage[:num_groups]
             dom_experts[ffn_name] = core_expert_indices.tolist()
@@ -206,6 +205,7 @@ class ExpertsGrouperForMixtral(object):
 
             # 2 Assign left unassigned experts to the cluster with the most similar core
             similarity_matrix = self.get_similarity_matrix(ffn_name)
+            print(similarity_matrix)
             for i in range(num_groups, self.num_experts):
                 # Find the most similar core
                 most_similar_core = core_expert_indices[
@@ -1234,8 +1234,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]] # token * hidden_size = 50000 * 14336
-    forwarded_hidden_states = forwarded_hidden_states # .cuda()
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
     concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
 
@@ -1269,7 +1268,6 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     
     print(f"Collected activations: {activations.shape}")
 
-    # Initialize the correlation matrix
     mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
     std = activations.std(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
     covar = torch.mm(
@@ -1362,6 +1360,12 @@ def _merge_moe_experts_within_and_across_models(
 
     moe.expert_dict = {} # org expert idx: new expert idx
     input_weight = None
+
+#     torch.cuda.memory._record_memory_history(
+#         enabled="all",
+#         context="all",
+#         stacks="all",
+#    )
 
     # p = 0
     for label in group_labels.unique():

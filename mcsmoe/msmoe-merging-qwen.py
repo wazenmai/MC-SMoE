@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 # @Author: pingzhili
 # @Time: 2024/2/18
+import os
+import gc
 from typing import Optional
 
 import logging
@@ -19,12 +21,17 @@ def evaluate_mcsmoe(
         model_name: Optional[str] = "Qwen/Qwen1.5-MoE-A2.7B-Chat",
         dominant: Optional[str] = "frequency", # random, frequency, knowledge
         similarity_base: Optional[str] = "router-logits",
-        mode: Optional[str] = "normal", # "normal" "activation-with-router-logits" "input-weight" "learnable weight"
+        mode: Optional[str] = "normal", 
+        merge: Optional[str] = "zipit", # zipit, freq
         num_fewshot: Optional[int] = 0,
+        n_sentences: Optional[int] = 32,
+        train_batch_size: Optional[int] = 4,
         eval_batch_size: Optional[int] = 32,
-        partition: Optional[int] = 2,
+        partition: Optional[int] = 1,
         output_path: Optional[str] = None,
 ):
+    print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
+
     eval_ppl = (task == "minipile")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -32,6 +39,7 @@ def evaluate_mcsmoe(
         model_name,
         torch_dtype=torch.float16, device_map="auto"
     )
+    model.eval()
 
     # dataloader_for_merging = get_minipile_dataloder(
     #     tokenizer=tokenizer,
@@ -44,8 +52,8 @@ def evaluate_mcsmoe(
         dataset="c4",
         tokenizer=tokenizer,
         max_block_size=2048,
-        n_blocks_for_stat=32, # 128, reduce size to avoid OOM
-        batch_size=eval_batch_size,
+        n_blocks_for_stat=n_sentences, # 128, reduce size to avoid OOM
+        batch_size=train_batch_size,
         num_workers=4,
     )
 
@@ -66,19 +74,19 @@ def evaluate_mcsmoe(
         dom_experts = grouper.group_experts_globally_from_dominant_experts(
             num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
         )
-        # freq merge
-        # model = merge_by_groups_with_usage_weighted(
-        #     model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
-        # )
-        # zipit merge
-        model = merge_by_groups_within_and_across_models(
-            mixtral_model=model,
-            grouper=grouper,
-            dataloader=dataloader_for_merging,
-            mode=mode,
-            dominant_alone=False,
-            usage_weighted=False
-        )
+        if merge == "freq":
+            model = merge_by_groups_with_usage_weighted(
+                model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+            )
+        else:
+            model = merge_by_groups_within_and_across_models(
+                qwen_model=model,
+                grouper=grouper,
+                dataloader=dataloader_for_merging,
+                mode=mode,
+                dominant_alone=False,
+                usage_weighted=False
+            )
     else:
         raise ValueError(f"Unknown dominant type: {dominant}")
     
@@ -92,7 +100,7 @@ def evaluate_mcsmoe(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
 
     del grouper
-    model = model.cuda()
+    # model = model.cuda()
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):
@@ -112,6 +120,8 @@ def evaluate_mcsmoe(
             evaluate_fewshot(
                 model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", eval_batch_size=eval_batch_size, log=True
             )
+            gc.collect()
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

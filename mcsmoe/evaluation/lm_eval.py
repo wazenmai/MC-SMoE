@@ -12,6 +12,8 @@ from transformers import (
     PreTrainedTokenizer
 )
 
+import numpy as np
+
 from lm_eval import evaluator
 from lm_eval.models.huggingface import HFLM
 # from lm_eval.tasks import initialize_tasks
@@ -50,6 +52,7 @@ def evaluate_fewshot(
         pretrained=model,
         tokenizer=tokenizer,
         batch_size=eval_batch_size,
+        device_map="auto"
     )
     results = evaluator.simple_evaluate(
         model=lm,

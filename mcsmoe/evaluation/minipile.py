@@ -22,8 +22,8 @@ from transformers.testing_utils import CaptureLogger
 logger = logging.getLogger(__name__)
 
 DATASETS = {
-    'c4': lambda: load_dataset('json', data_files={'train': 'mcsmoe/data/c4-train.00000-of-01024.json'}),
-    'math': lambda: load_dataset('json', data_files={'train': 'mcsmoe/data/math_pretrain_style.json'}),
+    'c4': lambda: load_dataset('json', data_files={'train': 'mcsmoe/data/c4-train.00000-of-01024.json'}, trust_remote_code=True),
+    'math': lambda: load_dataset('json', data_files={'train': 'data/math_pretrain_style.json'}),
 }
 
 def get_calib_dataloder(

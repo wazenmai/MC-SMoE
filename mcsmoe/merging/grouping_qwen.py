@@ -1,6 +1,7 @@
 import os
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
+from types import MethodType
 
 import torch
 from torch.nn import functional as F
@@ -369,25 +370,25 @@ def _merge_mlp_experts_by_usage_frequency_weighting(
 ) -> Qwen2MoeSparseMoeBlock:
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
-        w1_weight_list = torch.stack(
-            [ffn.experts[expert_idx].w1.weight * usage_frequencies[expert_idx]
+        gate_proj_weight_list = torch.stack(
+            [ffn.experts[expert_idx].gate_proj.weight * usage_frequencies[expert_idx]
              for expert_idx in expert_indices], dim=0
         )
-        w2_weight_list = torch.stack(
-            [ffn.experts[expert_idx].w2.weight * usage_frequencies[expert_idx]
+        down_proj_weight_list = torch.stack(
+            [ffn.experts[expert_idx].down_proj.weight * usage_frequencies[expert_idx]
              for expert_idx in expert_indices], dim=0
         )
-        w3_weight_list = torch.stack(
-            [ffn.experts[expert_idx].w3.weight * usage_frequencies[expert_idx]
+        up_proj_weight_list = torch.stack(
+            [ffn.experts[expert_idx].up_proj.weight * usage_frequencies[expert_idx]
              for expert_idx in expert_indices], dim=0
         )
-        w1_weight = torch.sum(w1_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        w2_weight = torch.sum(w2_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
-        w3_weight = torch.sum(w3_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+        gate_proj_weight = torch.sum(gate_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+        down_proj_weight = torch.sum(down_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
+        up_proj_weight = torch.sum(up_proj_weight_list, dim=0) / (torch.sum(usage_frequencies[expert_indices], dim=0) + FP32_EPS)
 
-        ffn.experts[expert_indices[0]].w1.weight.copy_(w1_weight)
-        ffn.experts[expert_indices[0]].w2.weight.copy_(w2_weight)
-        ffn.experts[expert_indices[0]].w3.weight.copy_(w3_weight)
+        ffn.experts[expert_indices[0]].gate_proj.weight.copy_(gate_proj_weight)
+        ffn.experts[expert_indices[0]].down_proj.weight.copy_(down_proj_weight)
+        ffn.experts[expert_indices[0]].up_proj.weight.copy_(up_proj_weight)
 
         for expert_idx in expert_indices[1:]:
             # Binding merged experts to the first of them
@@ -591,18 +592,21 @@ def _merge_moe_experts_within_and_across_models(
 
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
-
+        print(f"Group {label}: {expert_indices}")
         if mode == "input-weight":
             input_weight = []
             for expert_idx in expert_indices:
                 input_weight.append(forwarded_hidden_states[expert_idx].shape[0])
-            input_weight /= sum(input_weight)
+            s = sum(input_weight)
+            input_weight = [w / s for w in input_weight]
+            print(f"Input weight: {input_weight}")
+            # input_weight /= sum(input_weight)
 
         # not dominant
         group_forwarded_hidden_states = torch.cat([
             forwarded_hidden_states[expert_idx] for expert_idx in expert_indices
         ], dim=0)
-        if len(expert_indices == 1):
+        if len(expert_indices) == 1:
             merged_expert = moe.experts[expert_indices[0]]
         else:
             merged_expert = merge_qwen_moe_by_activation_matching_within_and_across_models(
@@ -671,7 +675,7 @@ def merge_by_groups_within_and_across_models(
     num_experts = grouper.num_experts
 
     def part_processor(sparse_layer_indices):
-        qwen_model.eval().cuda()
+        qwen_model.eval() #.cuda()
         handles = []
 
         def _get_activation_hook(name):
@@ -728,11 +732,11 @@ def merge_by_groups_within_and_across_models(
                                     batch_tensor[j] = True
                                     router_weight.append(router_weights[ffn_name][i][j][r])
                         # router_weight = torch.tensor(router_weight).unsqueeze(1).cpu().to(forwarded_hidden_states[ffn_name][i].dtype)
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].dtype)
+                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i])
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
                     else:
                         for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-                            if expert_index in router_indices[ffn_name][i][j]:
+                            if expert_idx in router_indices[ffn_name][i][j]:
                                 batch_tensor[j] = True
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor])
                 layer_forwarded_hidden_states += (
