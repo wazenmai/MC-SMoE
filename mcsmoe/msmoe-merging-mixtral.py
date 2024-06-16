@@ -41,7 +41,7 @@ def evaluate_mcsmoe(
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = MixtralForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16, device_map="auto"
+        torch_dtype=torch.float16, device_map="auto"
     )
     model.eval()
 
