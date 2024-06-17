@@ -47,7 +47,6 @@ def evaluate_mcsmoe(
     #     batch_size=1,
     #     subset_ratio=0.1,
     # )
-
     dataloader_for_merging = get_calib_dataloder(
         dataset="c4",
         tokenizer=tokenizer,
@@ -59,7 +58,6 @@ def evaluate_mcsmoe(
 
     # MC-SMoE!
     print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
-
     grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
     grouper.compute_all_similarities(model, dataloader_for_merging)
     
@@ -87,6 +85,14 @@ def evaluate_mcsmoe(
                 dominant_alone=False,
                 usage_weighted=False
             )
+    elif dominant == "knowledge":
+        model = grouper.all_in_one_knowledge_dominant(
+            model=model, 
+            dataloader=dataloader_for_merging, 
+            mode=mode,
+            num_groups=num_average_groups,
+        )
+        dom_experts = grouper.core_experts
     else:
         raise ValueError(f"Unknown dominant type: {dominant}")
     
@@ -100,7 +106,6 @@ def evaluate_mcsmoe(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
 
     del grouper
-    # model = model.cuda()
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):

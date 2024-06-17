@@ -41,7 +41,7 @@ def evaluate_mcsmoe(
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = MixtralForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16, device_map="auto"
+        torch_dtype=torch.float16, device_map="auto"
     )
     model.eval()
 
@@ -105,22 +105,6 @@ def evaluate_mcsmoe(
             f"Accepted dominant methods are `random`, `frequency` and `knowledge`, but you input {dominant}"
         )
 
-    # Freq-merge
-    # model = merge_by_groups_with_usage_weighted(
-    #     model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
-    # )
-
-    # ZipIt merge
-    # model = merge_by_groups_within_and_across_models(
-    #     mixtral_model=model,
-    #     grouper=grouper,
-    #     dataloader=dataloader_for_merging,
-    #     mode=mode,
-    #     partition=partition,
-    #     dominant_alone=False,
-    #     usage_weighted=False
-    # )
-
     # dom_experts = grouper.core_experts
 
     print(f"[MC-SMoE] ========= Grouping results ========= ")
@@ -131,8 +115,6 @@ def evaluate_mcsmoe(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
         
     del grouper
-
-    # model = model.cuda()
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):
