@@ -735,8 +735,8 @@ class ExpertsGrouperForMixtral(object):
                     hijack(experts[e].w2, _inputs[e], _hijack_input=True)
                 )
             handles.append(model.model.layers[layer_idx].block_sparse_moe.register_forward_hook(
-                _get_activation_hook(moe_name))
-            )
+                _get_activation_hook(moe_name)
+            ))
 
             # 2.3 Do forward and measure knowledge
             num_samples = 0
@@ -1110,13 +1110,7 @@ class ExpertsGrouperForMixtral(object):
 
         return model
 
-
             
-
-
-def prune_linear_layer(module, _mask, dim):
-    _device = module.weight.device
-
 def apply_mask(module, _mask):
     # applying masks to the input to compute gradients
     def masking(_, i):
