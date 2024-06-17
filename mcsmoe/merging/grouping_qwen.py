@@ -1,4 +1,6 @@
 import os
+import pickle
+import time
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple
 from types import MethodType
@@ -41,6 +43,9 @@ class ExpertsGrouperForQwen2MoE(object):
 
         self.num_experts = config.num_experts
         self.d_model = config.hidden_size
+        self.d_ff = config.moe_intermediate_size
+        self.top_k = config.num_experts_per_tok
+
         self.sparse_layer_indices = list(range(0, config.num_hidden_layers))
         self.similarity_fn = SIMILARITY_MAPPING_FUNCTION[similarity_fn]
         self.similarity_base = similarity_base
@@ -235,6 +240,11 @@ class ExpertsGrouperForQwen2MoE(object):
             model: Qwen2MoeForCausalLM,
             dataloader: DataLoader = None
     ):
+        # if os.path.exists("similarity.pkl"):
+        #     with open("similarity.pkl", "rb") as f:
+        #         self._similarity_state_dict = pickle.load(f)
+        #     return
+        
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -250,6 +260,9 @@ class ExpertsGrouperForQwen2MoE(object):
             self._compute_all_similarities_by_expert_outputs(model, dataloader)
         else:
             raise NotImplementedError
+        
+        # with open("similarity.pkl", "wb") as f:
+        #     pickle.dump(self._similarity_state_dict, f)
 
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE]  Computing similarities by weight..."):
@@ -361,6 +374,225 @@ class ExpertsGrouperForQwen2MoE(object):
                         self.save_similarity(ffn_name, i, j, similarity)
         
         torch.cuda.empty_cache()
+    
+    def all_in_one_knowledge_dominant(
+            self,
+            model: Qwen2MoeForCausalLM,
+            dataloader: DataLoader,
+            mode: Optional[str] = "normal",
+            num_groups: Optional[int] = 30,
+            dominant_alone: Optional[bool] = False,
+            usage_weighted: Optional[bool] = False,
+            lam_pred: Optional[float] = 1.0,
+            lam_rep: Optional[float] = 1e-5,
+            T: Optional[float] = 2.0,
+    ):
+        forwarded_hidden_states = [] # collect on cpu
+        core_experts = dict()
+        kd_labels = [] # collect on cpu
+
+        #TODO: collect kd outputs
+        def _get_activation_hook(name):
+            def hook(module, input, output):
+                forwarded_hidden_states.append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+            return hook
+        
+        for layer_idx in self.sparse_layer_indices:
+            _st = time.time()
+            _device = model.model.layers[layer_idx].mlp.experts[0].gate_proj.weight.device
+            moe_name = f"model.layers.{layer_idx}.mlp"
+            print(f"[Process-Start] === Layer {layer_idx} / {len(self.sparse_layer_indices)} -> {moe_name} ===")
+
+            # STEP: 1. Compute similarity
+            print(self._similarity_state_dict[moe_name][0])
+            
+            # STEP: 2. Compute knowledge + Collect activation for zipit merging
+            # 2.1 Initialization
+            model.eval()
+            # model.zero_grad()
+            for p in model.parameters():
+                p.requires_grad_(False)
+            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(_device)
+            moe_masks.requires_grad_(True)
+
+            # Zipit variables
+            router_indices = []
+            router_weights = []
+
+            # 2.2 Register hook function
+            handles = []
+            _inputs = {}
+            moe = model.model.layers[layer_idx].mlp
+            experts = model.model.layers[layer_idx].mlp.experts
+            for e in range(self.num_experts):
+                handles.append(
+                    apply_mask(experts[e].down_proj, moe_masks[e])
+                )
+                _inputs[e] = []
+                handles.append(
+                    hijack(experts[e].down_proj, _inputs[e], _hijack_input=True)
+                )
+            handles.append(moe.register_forward_hook(
+                _get_activation_hook(moe_name)
+            ))
+
+            # 2.3 Do forward and measure knowledge
+            num_samples = 0
+            num_tokens = 0
+            _index = 0
+            print("[Computing] Do forward and measure knowledge on batch")
+            for b, batch in enumerate(dataloader):
+                print(b, end='')
+                batch = {k: v.to(_device) for k, v in batch.items()}
+                att_mask = batch["attention_mask"].bool().reshape(-1)
+                batch_samples = batch["attention_mask"].shape[0]
+                num_samples += batch_samples
+                num_tokens += att_mask.sum().item()
+                outputs = model(**batch, output_router_logits=True)
+                router_logits = outputs.router_logits
+
+                if layer_idx == 0:
+                    pred = F.softmax(outputs.logits / T, dim=1).detach()
+                    kd_labels.append(pred.cpu())
+                else:
+                    pred = kd_labels[_index:_index + batch_samples, :].to(_device)
+                    _index += batch_samples
+                kl_div = F.kl_div(
+                    input=F.log_softmax(outputs.logits / T, dim=1),
+                    target=pred,
+                    reduction="batchmean"
+                ) * (T ** 2)
+                if kl_div > 10:
+                    kl_div /= 1000
+                print(f"kl_div: {kl_div.item()}")
+
+                kl_div.backward()
+
+                del outputs, pred, kl_div
+                
+                # Measure amount of knowledge
+                routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+                routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+                router_indices.append(selected_experts)
+                if mode == "activation-with-router-logits":
+                    router_weights.append(routing_weights)
+                expert_index = selected_experts[att_mask]
+                del routing_weights, selected_experts
+                for e in range(self.num_experts):
+                    # get feature
+                    # token_id = (expert_index == e).nonzero()
+                    # number_of_tokens = token_id.shape[0]
+                    # print(f"_inputs: {len(_inputs[e])}, {_inputs[e][-1].shape}, number_of_tokens: {number_of_tokens}")
+                    # _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).to(_device)
+                    # print(f"_inputs: {len(_inputs[e])}, {_inputs[e][-1].shape}")
+                    _features = _inputs[e][-1].to(torch.float32).to(_device)
+
+                    # get weigth and calculate representational knowledge
+                    _weight = experts[e].down_proj.weight.detach()
+                    moe_rep_kl[e] += ((_features ** 2).sum(dim=0) * (_weight ** 2).mean(dim=0)).data
+
+                    # get gradient and calculate predictive knowledge
+                    grad = moe_masks.grad[e]
+                    moe_pred_kl[e] += (grad.detach() ** 2) * 0.5
+
+                    del _inputs[e][-1], _features, _weight, grad
+                moe_masks.grad.zero_()
+            print(torch.cuda.memory_summary())
+            # 2.4 Average score
+            moe_pred_kl /= num_samples
+            moe_rep_kl /= num_tokens
+
+            print(f"moe_pred_kl: {moe_pred_kl.shape} {moe_pred_kl}")
+            print(f"moe_rep_kl: {moe_rep_kl.shape} {moe_rep_kl}")
+
+            # 2.5 Compute score
+            moe_scores = (moe_rep_kl * lam_rep + moe_pred_kl * lam_pred).mean(dim=-1) # (E,)
+            print(f"moe_scores: {moe_scores.shape} {moe_scores}")
+
+            if layer_idx == 0:
+                kd_labels = torch.cat(kd_labels, dim=0)
+                print(f"kd_labels: {kd_labels.shape} {kd_labels}")
+            
+            for handle in handles:
+                handle.remove()
+            del handles, moe_pred_kl, moe_rep_kl, moe_masks, _inputs
+
+            # STEP: 3. Choose dominant experts by knowledge, group them by similarity
+            print(f"[Process-Grouping] === Choose dominant experts by knowledge, group them by similarity {self.similarity_base} ===")
+            indices_sorted_by_kl = torch.argsort(moe_scores, descending=True).cpu()
+            core_expert_indices = indices_sorted_by_kl[:num_groups]
+            core_experts[moe_name] = core_expert_indices.tolist()
+            for i in range(num_groups):
+                self._group_state_dict[moe_name][core_expert_indices[i]] = i
+            similarity_matrix = self.get_similarity_matrix(moe_name)
+            for i in range(num_groups, self.num_experts):
+                most_similar_core = core_expert_indices[
+                    torch.argmax(similarity_matrix[i, core_expert_indices])
+                ]
+                most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
+                self._group_state_dict[moe_name][i] = most_similar_group_label
+            print(f"core expert: {core_experts[moe_name]}")
+
+            # STEP: 4. Zipit Merge
+            group_labels = self._group_state_dict[moe_name]
+            layer_forwarded_hidden_states = tuple()
+            for e in range(self.num_experts):
+                hidden_states_list = []
+                for i in range(len(dataloader)): # batch of data
+                    batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[i]))])
+                    if mode == "activation-with-router-logits":
+                        router_weight = []
+                        for j in range(len(forwarded_hidden_states[i])): # one token
+                            for r, ind in enumerate(router_indices[i][j]): # token's router-logits and expert-index
+                                if e == ind:
+                                    batch_tensor[j] = True
+                                    router_weight.append(router_weights[i][j][r])
+                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[i].dtype) # .cpu()
+                        hidden_states_list.append(forwarded_hidden_states[i][batch_tensor] * router_weight)
+                    else:
+                        for j in range(len(forwarded_hidden_states[i])): # one token
+                            if e in router_indices[i][j]:
+                                batch_tensor[j] = True
+                        hidden_states_list.append(forwarded_hidden_states[i][batch_tensor])
+                layer_forwarded_hidden_states += (torch.cat(hidden_states_list, dim=0),)
+            model.model.layers[layer_idx].mlp = _merge_moe_experts_within_and_across_models(
+                moe=moe,
+                group_labels=group_labels,
+                forwarded_hidden_states=layer_forwarded_hidden_states,
+                dominant_alone=dominant_alone,
+                mode=mode,
+                core_expert_indices=core_experts[moe_name] if core_experts is not None else None,
+                usage_frequencies=self._usage_frequency_state_dict[moe_name] if usage_weighted else None,
+            )
+
+            del layer_forwarded_hidden_states
+            forwarded_hidden_states = []
+            print(f"[Process-End] === Layer {layer_idx} / {len(self.sparse_layer_indices)}, cost {time.time() - _st:2f}s ===")
+        self.core_experts = core_experts
+        return model
+
+def apply_mask(module, _mask):
+    # applying masks to the input to compute gradients
+    def masking(_, i):
+        return _mask * i[0]
+
+    handle = module.register_forward_pre_hook(masking)
+    return handle
+
+def hijack(module, _list, _hijack_input, _stop_forward=False):
+    # if _stop_forward=True, then it raise error after forwarding the module
+    if _hijack_input:
+        def input_hook(_, inputs, __):
+            _list.append(inputs[0].detach().cpu()) # .clone().data
+            if _stop_forward:
+                raise StopFowardException
+
+        handle = module.register_forward_hook(input_hook)
+    else:
+        raise NotImplementedError
+    return handle         
 
 @torch.no_grad()
 def _merge_mlp_experts_by_usage_frequency_weighting(
@@ -429,6 +661,7 @@ def merge_qwen_moe_by_activation_matching_within_and_across_models(
     if mini_batch_size is None:
         mini_batch_size = forwarded_hidden_states.shape[0]
 
+    _device = forwarded_hidden_states.device
     ffn_all_gate_proj = torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0)
     ffn_all_down_proj = torch.cat([ffn.down_proj.weight.data for ffn in ffn_list], dim=1)
     ffn_all_up_proj = torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0)
@@ -438,7 +671,10 @@ def merge_qwen_moe_by_activation_matching_within_and_across_models(
     concat_ffn.gate_proj.weight.data = ffn_all_gate_proj
     concat_ffn.down_proj.weight.data = ffn_all_down_proj
     concat_ffn.up_proj.weight.data = ffn_all_up_proj
-    concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
+    # concat_ffn = concat_ffn.eval()
+    concat_ffn.gate_proj.weight.to(_device)
+    concat_ffn.up_proj.weight.to(_device)
+    concat_ffn.down_proj.weight.to(_device)
     
     activations = []
     
@@ -587,7 +823,7 @@ def _merge_moe_experts_within_and_across_models(
         usage_frequencies: Optional[torch.Tensor] = None,
 ) -> Qwen2MoeSparseMoeBlock:
 
-    moe.expert_dict = {}
+    # moe.expert_dict = {}
     input_weight = None
 
     for label in group_labels.unique():
@@ -620,15 +856,15 @@ def _merge_moe_experts_within_and_across_models(
         moe.experts[expert_indices[0]].down_proj.weight.copy_(merged_expert.down_proj.weight)
         moe.experts[expert_indices[0]].up_proj.weight.copy_(merged_expert.up_proj.weight)
 
-        moe.expert_dict[expert_indices[0].item()] = expert_indices[0].item()
+        # moe.expert_dict[expert_indices[0].item()] = expert_indices[0].item()
 
         for expert_idx in expert_indices[1:]:
             # Binding merged experts to the first of them
-            # moe.experts[expert_idx] = moe.experts[expert_indices[0]]
-            moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
-            moe.experts[expert_idx.item()] = None
-    print(moe.expert_dict)
-    moe.forward = MethodType(merged_qwen2moe_forward, moe)
+            moe.experts[expert_idx] = moe.experts[expert_indices[0]]
+            # moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
+            # moe.experts[expert_idx.item()] = None
+    # print(moe.expert_dict)
+    # moe.forward = MethodType(merged_qwen2moe_forward, moe)
     return moe
 
 @torch.no_grad()
