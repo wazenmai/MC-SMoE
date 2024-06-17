@@ -15,7 +15,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="normal" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-router-logits-group-zipit-merge" |& tee results/log_qwen_45e_kl-dom-router-logits-group-zipit-merge
@@ -29,7 +29,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="activation-with-router-logits" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-router-logits-group-zipit-activation-with-router-logits-merge" |& tee results/log_qwen_45e_kl-dom-router-logits-group-zipit-activation-with-router-logits-merge
@@ -43,7 +43,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="input-weight" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-router-logits-group-zipit-input-weight-merge" |& tee results/log_qwen_45e_kl-dom-router-logits-group-zipit-input-weight-merge
@@ -57,7 +57,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="normal" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-weight-group-zipit-merge" |& tee results/log_qwen_45e_kl-dom-weight-group-zipit-merge
@@ -71,7 +71,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="activation-with-router-logits" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-weight-group-zipit-activation-with-router-logits-merge" |& tee results/log_qwen_45e_kl-dom-weight-group-zipit-activation-with-router-logits-merge
@@ -85,7 +85,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="input-weight" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-weight-group-zipit-input-weight-merge" |& tee results/log_qwen_45e_kl-dom-weight-group-zipit-input-weight-merge
@@ -99,7 +99,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="normal" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-expert-output-group-zipit-merge" |& tee results/log_qwen_45e_kl-dom-expert-output-group-zipit-merge
@@ -113,7 +113,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="activation-with-router-logits" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-expert-output-group-zipit-activation-with-router-logits-merge" |& tee results/log_qwen_45e_kl-dom-expert-output-group-zipit-activation-with-router-logits-merge
@@ -127,7 +127,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="input-weight" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=32 \
   --partition=1 \
   --output_path="/app/results/mc-smoe/qwen/merge-45e/kl-dom-expert-output-group-zipit-input-weight-merge" |& tee results/log_qwen_45e_kl-dom-expert-output-group-zipit-input-weight-merge

@@ -1,5 +1,6 @@
 import gc
 import os
+import pickle
 import time
 from copy import deepcopy
 from pickle import dump
@@ -444,6 +445,10 @@ class ExpertsGrouperForMixtral(object):
             model: MixtralForCausalLM,
             dataloader: DataLoader = None
     ):
+        # if os.path.exists("similarity.pkl"):
+        #     with open("similarity.pkl", "rb") as f:
+        #         self._similarity_state_dict = pickle.load(f)
+        #     return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -461,6 +466,8 @@ class ExpertsGrouperForMixtral(object):
             self._compute_all_similarities_by_expert_inputs_abs(model, dataloader)
         else:
             raise NotImplementedError
+        # with open("similarity.pkl", "wb") as f:
+        #     pickle.dump(self._similarity_state_dict, f)
     
     def compute_similarities_layerwise(
         self,
@@ -468,6 +475,10 @@ class ExpertsGrouperForMixtral(object):
         layer_idx: int,
         dataloader: DataLoader = None
     ):
+        if os.path.exists("similarity.pkl"):
+            with open("similarity.pkl", "rb") as f:
+                self._similarity_state_dict = pickle.load(f)
+            return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -483,6 +494,9 @@ class ExpertsGrouperForMixtral(object):
             self._compute_layer_similarities_by_expert_outputs(model, dataloader, layer_idx)
         else:
             raise NotImplementedError
+        
+        with open("similarity.pkl", "wb") as f:
+            pickle.dump(self._similarity_state_dict, f)
 
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE]  Computing similarities by weight..."):
@@ -697,6 +711,8 @@ class ExpertsGrouperForMixtral(object):
             return hook
 
         for layer_idx in self.sparse_layer_indices:
+            _st = time.time()
+            _device = model.model.layers[layer_idx].block_sparse_moe.experts[0].w2.weight.device
             moe_name = f"model.layers.{layer_idx}.block_sparse_moe"
             print(f"[Process-Start] === Layer {layer_idx} / {len(self.sparse_layer_indices)} -> {moe_name} ===")
 
@@ -745,7 +761,7 @@ class ExpertsGrouperForMixtral(object):
             print("[Computing] Do forward and measure knowledge on batch ")
             for b, batch in enumerate(dataloader):
                 print(b, end='')
-                batch = {k: v.cuda() for k, v in batch.items()}
+                batch = {k: v.to(_device) for k, v in batch.items()}
                 att_mask = batch['attention_mask'].bool().reshape(-1)
                 batch_samples = batch['attention_mask'].shape[0]
                 num_samples += batch_samples
@@ -819,6 +835,7 @@ class ExpertsGrouperForMixtral(object):
 
                 moe_masks.grad = None
             
+            print(torch.cuda.memory_summary())
             # 2.4 Averaging score
             moe_pred_kl /= num_samples
             moe_rep_kl /= num_tokens
@@ -902,6 +919,7 @@ class ExpertsGrouperForMixtral(object):
 
             del layer_forwarded_hidden_states
             forwarded_hidden_states = []
+            print(f"[Process-End] === Layer {layer_idx} / {len(self.sparse_layer_indices)}, {time.time() - _st:2f}s ===")
         
         self.core_experts = core_experts
 
@@ -1198,6 +1216,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     if mini_batch_size is None:
         mini_batch_size = forwarded_hidden_states.shape[0]
 
+    _device = concat_ffn.w1.weight.device
     ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0)
     ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=1)
     ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0)
@@ -1209,6 +1228,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     concat_ffn.w3.weight.data = ffn_all_w3
     # concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     # print("modified activation collecting!")
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
 
     # activations_dict = {}
     handles = []
@@ -1225,7 +1245,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     
     handle = concat_ffn.w2.register_forward_hook(_activation_hook) 
 
-    print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
+    print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape}")
     
     randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
     forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
@@ -1260,7 +1280,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     # for ffn in ffn_list:
         # ffn = ffn.cpu()
     
-    print(f"Collected activations: {activations.shape}")
+    print(f"Collected activations: {activations.shape} {activations.device}")
 
     mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
     std = activations.std(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
@@ -1275,7 +1295,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     torch.cuda.empty_cache()
 
     corr_matrix[torch.arange(d_ff * num_ffn), torch.arange(d_ff * num_ffn)] = -1  # Remove self-correlation
-    print(f"corr_matrix: {corr_matrix.shape}, time: {time.ctime(time.time())}")
+    print(f"corr_matrix: {corr_matrix.shape}")
 
     # Greedy Merging!
     while ffn_all_w1.shape[0] > d_ff:
@@ -1364,7 +1384,7 @@ def _merge_moe_experts_within_and_across_models(
     # p = 0
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
-        print(f"\nexpert_indices: {len(expert_indices)} {expert_indices}, {time.ctime(time.time())}")
+        print(f"\nGroup {label}: {expert_indices}")
 
         if dominant_alone:
             group_core_expert_indices = torch.stack([
@@ -1431,7 +1451,7 @@ def _merge_moe_experts_within_and_across_models(
                 merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
                     ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
                     forwarded_hidden_states=group_forwarded_hidden_states,
-                    mini_batch_size=4096,
+                    mini_batch_size=5000,
                     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                     input_weight=input_weight,
                 )
