@@ -13,7 +13,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="router-logits" \
   --mode="normal" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -27,7 +27,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="router-logits" \
   --mode="activation-with-router-logits" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -41,7 +41,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="router-logits" \
   --mode="input-weight" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -55,7 +55,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="weight" \
   --mode="normal" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -69,7 +69,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="weight" \
   --mode="activation-with-router-logits" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -83,7 +83,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="weight" \
   --mode="input-weight" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -97,7 +97,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="expert-output" \
   --mode="normal" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -111,7 +111,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="expert-output" \
   --mode="activation-with-router-logits" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \
@@ -125,7 +125,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --dominant="frequency" \
   --similarity_base="expert-output" \
   --mode="input-weight" \
-  --num_average_groups=45 \
+  --num_average_groups=30 \
   --n_sentences=32 \
   --train_batch_size=8 \
   --eval_batch_size=32 \

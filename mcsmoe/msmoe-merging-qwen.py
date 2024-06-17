@@ -47,7 +47,6 @@ def evaluate_mcsmoe(
     #     batch_size=1,
     #     subset_ratio=0.1,
     # )
-
     dataloader_for_merging = get_calib_dataloder(
         dataset="c4",
         tokenizer=tokenizer,
@@ -59,7 +58,6 @@ def evaluate_mcsmoe(
 
     # MC-SMoE!
     print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
-
     grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
     grouper.compute_all_similarities(model, dataloader_for_merging)
     
