@@ -87,6 +87,14 @@ def evaluate_mcsmoe(
                 dominant_alone=False,
                 usage_weighted=False
             )
+    elif dominant == "knowledge":
+        model = grouper.all_in_one_knowledge_dominant(
+            model=model, 
+            dataloader=dataloader_for_merging, 
+            mode=mode,
+            num_groups=num_average_groups,
+        )
+        dom_experts = grouper.core_experts
     else:
         raise ValueError(f"Unknown dominant type: {dominant}")
     
@@ -100,7 +108,6 @@ def evaluate_mcsmoe(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
 
     del grouper
-    # model = model.cuda()
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):

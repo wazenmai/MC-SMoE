@@ -132,8 +132,6 @@ def evaluate_mcsmoe(
         
     del grouper
 
-    # model = model.cuda()
-
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):
         os.makedirs(output_path)
