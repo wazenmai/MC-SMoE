@@ -60,8 +60,7 @@ def evaluate_mcsmoe(
             num_workers=4,
         )
 
-    # MC-SMoE!
-    if merge != "no":
+        # MC-SMoE!
         print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
         grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
         grouper.compute_all_similarities(model, dataloader_for_merging)
