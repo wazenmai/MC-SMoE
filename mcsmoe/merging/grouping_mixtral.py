@@ -723,9 +723,11 @@ class ExpertsGrouperForMixtral(object):
             for name, p in model.named_parameters():
                 if p.requires_grad_:
                     p.requires_grad_(False)
-            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(model.device)
+            experts = model.model.layers[layer_idx].block_sparse_moe.experts
+            _device = experts[0].w2.weight.device
+            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(_device)
             moe_masks.requires_grad_(True)
 
             # Zipit variables
@@ -736,7 +738,6 @@ class ExpertsGrouperForMixtral(object):
             _inputs = {}
 
             # 2.2 Register hook function
-            experts = model.model.layers[layer_idx].block_sparse_moe.experts
             for e in range(self.num_experts):
                 # Apply layer mask
                 handles.append(
@@ -770,7 +771,7 @@ class ExpertsGrouperForMixtral(object):
                     pred = F.softmax(outputs.logits / T, dim=1).detach()
                     kd_labels.append(pred.cpu())
                 else:
-                    pred = kd_labels[_index:_index + batch_samples, :].to(model.device)
+                    pred = kd_labels[_index:_index + batch_samples, :].to(_device)
                     _index += batch_samples
                 kl_div = F.kl_div(
                     input=F.log_softmax(outputs.logits / T, dim=1),
@@ -807,7 +808,7 @@ class ExpertsGrouperForMixtral(object):
                     # get feature
                     token_id = (expert_index == e).nonzero()
                     number_of_tokens = token_id.shape[0]
-                    _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).cuda()
+                    _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).to(_device)
                     # for dim1 in range(_features.shape[0]):
                     #     for dim2 in range(_features.shape[1]):
                     #         if _features[dim1][dim2] >= 1:
@@ -1191,8 +1192,8 @@ def remove_row(x, idx):
     return torch.cat([x[:idx], x[idx+1:]], dim=0)
 
 @torch.no_grad()
-def _zipit_merge(temp_dim, target_dim, weight1, weight3, data):
-    permutation_matrix = torch.eye(temp_dim, temp_dim).to("cuda").to(torch.float16)
+def _zipit_merge(temp_dim, target_dim, weight1, weight3, data,):
+    permutation_matrix = torch.eye(temp_dim, temp_dim).to(torch.float16)
     ROUND = 0
     act = torch.nn.SiLU()
     while temp_dim > target_dim:
@@ -1268,7 +1269,7 @@ def _merge_moe_experts_by_zipit(
     ### Merge W1 and W3
     ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
     ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
-    first_permutation_matrix = _zipit_merge(d_ff * num_ffn, d_ff, ffn_all_w1, ffn_all_w3, forwarded_hidden_states)
+    first_permutation_matrix = _zipit_merge(d_ff * num_ffn, d_ff, ffn_all_w1, ffn_all_w3, forwarded_hidden_states).to(_device)
     first_unmerge_matrix = first_permutation_matrix
     first_merge_matrix = torch.div(first_permutation_matrix, torch.sum(first_permutation_matrix, dim=0, keepdim=True))
 
@@ -1280,7 +1281,7 @@ def _merge_moe_experts_by_zipit(
     ### Merge W2
     new_data = act(torch.matmul(forwarded_hidden_states, ffn_w1.T)) * torch.matmul(forwarded_hidden_states, ffn_w3.T)
     ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=0) # (d_model * num_ffn, d_ff)
-    second_permutation_matrix = _zipit_merge(d_model * num_ffn, d_model, ffn_all_w2, None, new_data)
+    second_permutation_matrix = _zipit_merge(d_model * num_ffn, d_model, ffn_all_w2, None, new_data).to(_device)
     second_merge_matrix = torch.div(second_permutation_matrix, torch.sum(second_permutation_matrix, dim=0, keepdim=True))
     second_unmerge_matrix = second_permutation_matrix
     ffn_w2 = torch.zeros(d_model, d_ff).to(_device)
@@ -1680,21 +1681,21 @@ def _merge_moe_experts_within_and_across_models(
             if len(expert_indices) == 1:
                 merged_expert = moe.experts[expert_indices[0]]
             else:
-                # merged_expert = _merge_moe_experts_by_zipit(
-                #     ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
-                #     forwarded_hidden_states=group_forwarded_hidden_states,
-                #     mini_batch_size=5000,
-                #     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
-                #     input_weight=input_weight,
-                # )
-                merged_expert = _merge_moe_experts_with_dominant(
+                merged_expert = _merge_moe_experts_by_zipit(
                     ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
                     forwarded_hidden_states=group_forwarded_hidden_states,
                     mini_batch_size=5000,
                     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                     input_weight=input_weight,
-                    dominant_index=core_expert_indices[0],
                 )
+                # merged_expert = _merge_moe_experts_with_dominant(
+                #     ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                #     forwarded_hidden_states=group_forwarded_hidden_states,
+                #     mini_batch_size=5000,
+                #     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                #     input_weight=input_weight,
+                #     dominant_index=core_expert_indices[0],
+                # )
         moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
         moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
         moe.experts[expert_indices[0].item()].w3.weight.copy_(merged_expert.w3.weight)
