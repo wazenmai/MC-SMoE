@@ -2,6 +2,7 @@ import gc
 import os
 import pickle
 import time
+import sys
 from copy import deepcopy
 from pickle import dump
 from types import MethodType
@@ -27,7 +28,6 @@ LEGAL_SIMILARITY_BASES = ["weight", "feature", "feature.abs", "weight-feature", 
                           "router-logits", "router-weight", "router-weight-feature", "mse", "random",
                           "feature-correlation.lsa", "feature-correlation.max", "expert-output"]
 
-
 class ExpertsGrouperForMixtral(object):
     def __init__(
             self,
@@ -47,7 +47,8 @@ class ExpertsGrouperForMixtral(object):
         self.d_model = config.hidden_size
         self.d_ff = config.intermediate_size
         self.topk = config.num_experts_per_tok
-        self.sparse_layer_indices = list(range(0, config.num_hidden_layers))
+        # self.sparse_layer_indices = list(range(0, config.num_hidden_layers))
+        self.sparse_layer_indices = [config.num_hidden_layers - 1]
         self.similarity_fn = SIMILARITY_MAPPING_FUNCTION[similarity_fn]
         self.similarity_base = similarity_base
         self._group_state_dict = None
@@ -342,7 +343,7 @@ class ExpertsGrouperForMixtral(object):
                     hijack(experts[e].w2, _inputs[layer_idx][e], _hijack_input=True)
                 )
         
-        print(torch.cuda.memory_summary())
+        # print(torch.cuda.memory_summary())
         
         # 3. Do forward and measure knowledge
         num_samples = 0
@@ -365,13 +366,9 @@ class ExpertsGrouperForMixtral(object):
                 target=pred,
                 reduction="batchmean"
             )
-            if num_samples <= 1:
-                print(torch.cuda.memory_summary())
             kl_div.backward()
 
             del outputs, pred, kl_div
-            if num_samples <= 1:
-                print(torch.cuda.memory_summary())
             # torch.cuda.memory._dump_snapshot(f"snapshot_{num_samples}.pickle")
 
             # Measure amount of knowledge
@@ -445,10 +442,10 @@ class ExpertsGrouperForMixtral(object):
             model: MixtralForCausalLM,
             dataloader: DataLoader = None
     ):
-        # if os.path.exists("similarity.pkl"):
-        #     with open("similarity.pkl", "rb") as f:
-        #         self._similarity_state_dict = pickle.load(f)
-        #     return
+        if os.path.exists("similarity.pkl"):
+            with open("similarity.pkl", "rb") as f:
+                self._similarity_state_dict = pickle.load(f)
+            return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -466,8 +463,8 @@ class ExpertsGrouperForMixtral(object):
             self._compute_all_similarities_by_expert_inputs_abs(model, dataloader)
         else:
             raise NotImplementedError
-        # with open("similarity.pkl", "wb") as f:
-        #     pickle.dump(self._similarity_state_dict, f)
+        with open("similarity.pkl", "wb") as f:
+            pickle.dump(self._similarity_state_dict, f)
     
     def compute_similarities_layerwise(
         self,
@@ -475,10 +472,10 @@ class ExpertsGrouperForMixtral(object):
         layer_idx: int,
         dataloader: DataLoader = None
     ):
-        if os.path.exists("similarity.pkl"):
-            with open("similarity.pkl", "rb") as f:
-                self._similarity_state_dict = pickle.load(f)
-            return
+        # if os.path.exists("similarity.pkl"):
+        #     with open("similarity.pkl", "rb") as f:
+        #         self._similarity_state_dict = pickle.load(f)
+        #     return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -495,8 +492,8 @@ class ExpertsGrouperForMixtral(object):
         else:
             raise NotImplementedError
         
-        with open("similarity.pkl", "wb") as f:
-            pickle.dump(self._similarity_state_dict, f)
+        # with open("similarity.pkl", "wb") as f:
+        #     pickle.dump(self._similarity_state_dict, f)
 
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE]  Computing similarities by weight..."):
@@ -769,7 +766,7 @@ class ExpertsGrouperForMixtral(object):
                 outputs = model(**batch, output_router_logits=True)
                 router_logits = outputs.router_logits
                 
-                if layer_idx == 0:
+                if layer_idx == self.sparse_layer_indices[0]:
                     pred = F.softmax(outputs.logits / T, dim=1).detach()
                     kd_labels.append(pred.cpu())
                 else:
@@ -779,7 +776,10 @@ class ExpertsGrouperForMixtral(object):
                     input=F.log_softmax(outputs.logits / T, dim=1),
                     target=pred,
                     reduction="batchmean"
-                ) * (T ** 2) / 100
+                ) * (T ** 2)
+
+                if kl_div > 10:
+                    kl_div /= 100
 
                 if layer_idx >= 1:
                     print(f"kl_div: {kl_div}")
@@ -835,7 +835,7 @@ class ExpertsGrouperForMixtral(object):
 
                 moe_masks.grad = None
             
-            print(torch.cuda.memory_summary())
+            # print(torch.cuda.memory_summary())
             # 2.4 Averaging score
             moe_pred_kl /= num_samples
             moe_rep_kl /= num_tokens
@@ -846,7 +846,7 @@ class ExpertsGrouperForMixtral(object):
             # 2.5 Compute score
             moe_scores = (moe_rep_kl * lam_rep + moe_pred_kl * lam_pred).mean(dim=-1)
             print(f"\nmoe_scores: {moe_scores}")
-            if layer_idx == 0:
+            if layer_idx == self.sparse_layer_indices[0]:
                 kd_labels = torch.cat(kd_labels, dim=0)
                 print(f"kd_labels: {kd_labels.shape}")
 
@@ -1184,6 +1184,239 @@ def _merge_mlp_experts_by_usage_frequency_weighting(
 
     return ffn
 
+def remove_col(x, idx):
+    return torch.cat([x[:, :idx], x[:, idx+1:]], dim=-1)
+
+def remove_row(x, idx):
+    return torch.cat([x[:idx], x[idx+1:]], dim=0)
+
+@torch.no_grad()
+def _zipit_merge(temp_dim, target_dim, weight1, weight3, data):
+    permutation_matrix = torch.eye(temp_dim, temp_dim).to("cuda").to(torch.float16)
+    ROUND = 0
+    act = torch.nn.SiLU()
+    while temp_dim > target_dim:
+        ROUND += 1
+        odd = temp_dim % 2
+        target_dim_this_round = max(target_dim, temp_dim // 2 + odd)
+        print(f"ROUND {ROUND}. From {temp_dim} to {target_dim_this_round}")
+        
+        ### Collect activations
+        activations = []
+        if weight3 is None:
+            cur = torch.matmul(data, weight1.T)
+        else:
+            cur = act(torch.matmul(data, weight1.T)) * torch.matmul(data, weight3.T)
+        activations.append(cur.reshape(-1, cur.shape[-1]))
+        activations = torch.cat(activations, dim=0)
+        print("Activations: ", activations.shape)
+        ### Compute covariance
+        mean = activations.mean(dim=0, keepdim=True)
+        std = activations.std(dim=0, keepdim=True)
+        covar = torch.matmul((activations - mean).T, activations - mean) / (activations.shape[0] - 1)
+        corr_matrix = covar / (std.T * std + FP32_EPS)
+        del mean, std, covar
+        torch.cuda.empty_cache()
+        corr_matrix[torch.arange(temp_dim), torch.arange(temp_dim)] = -1 # Remove self-correlation
+        print(corr_matrix)
+        ### Merge temp_dim / 2 times
+        for _ in range(temp_dim - target_dim_this_round):
+            max_index = torch.argmax(corr_matrix)
+            row, col = max_index // corr_matrix.shape[0], max_index % corr_matrix.shape[0]
+            permutation_matrix[:, row] += permutation_matrix[:, col]
+            permutation_matrix = remove_col(permutation_matrix, col)
+
+            # row_coef, col_coef = average_coefs[row], average_coefs[col]
+            row_coef, col_coef = 1.0, 1.0
+            weight1[row] = (row_coef * weight1[row] + col_coef * weight1[col]) / (row_coef + col_coef + FP32_EPS)
+            if weight3 is not None:
+                weight3[row] = (row_coef * weight3[row] + col_coef * weight3[col]) / (row_coef + col_coef + FP32_EPS)
+                weight3 = remove_row(weight3, col)
+            weight1 = remove_row(weight1, col)
+            
+            corr_matrix[row] = FP32_EPS # set very small number to avoid repeated merging
+            corr_matrix[:, row] = FP32_EPS
+            corr_matrix[row, row] = -1
+            corr_matrix = remove_col(corr_matrix, col)
+            corr_matrix = remove_row(corr_matrix, col)
+        temp_dim = weight1.shape[0]
+    for i in range(20): # permutation_matrix.shape[1]
+        print(permutation_matrix[:, i].nonzero().squeeze())
+    return permutation_matrix
+
+@torch.no_grad()
+def _merge_moe_experts_by_zipit(
+    ffn_list: List[MixtralBlockSparseTop2MLP],
+    forwarded_hidden_states: torch.Tensor,
+    mini_batch_size: Optional[int] = None,
+    alpha_for_repeated_merging: Optional[float] = 0.1,
+    average_coefs: Optional[List[float]] = None,
+    input_weight: Optional[List[float]] = None,
+) -> MixtralBlockSparseTop2MLP:
+    d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
+    num_ffn = len(ffn_list)
+    temp_dim = d_ff * num_ffn
+    average_coefs = [1.0] * temp_dim
+    act = torch.nn.SiLU()
+
+    _device = ffn_list[0].w1.weight.device
+    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:30000]]
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+    print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {temp_dim}, target_dim: {d_ff}")
+
+    ### Merge W1 and W3
+    ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    first_permutation_matrix = _zipit_merge(d_ff * num_ffn, d_ff, ffn_all_w1, ffn_all_w3, forwarded_hidden_states)
+    first_unmerge_matrix = first_permutation_matrix
+    first_merge_matrix = torch.div(first_permutation_matrix, torch.sum(first_permutation_matrix, dim=0, keepdim=True))
+
+    ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_w1 = torch.matmul(first_merge_matrix.T, ffn_all_w1)
+    ffn_w3 = torch.matmul(first_merge_matrix.T, ffn_all_w3)
+
+    ### Merge W2
+    new_data = act(torch.matmul(forwarded_hidden_states, ffn_w1.T)) * torch.matmul(forwarded_hidden_states, ffn_w3.T)
+    ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=0) # (d_model * num_ffn, d_ff)
+    second_permutation_matrix = _zipit_merge(d_model * num_ffn, d_model, ffn_all_w2, None, new_data)
+    second_merge_matrix = torch.div(second_permutation_matrix, torch.sum(second_permutation_matrix, dim=0, keepdim=True))
+    second_unmerge_matrix = second_permutation_matrix
+    ffn_w2 = torch.zeros(d_model, d_ff).to(_device)
+    for i in range(num_ffn):
+        ffn_w2 += torch.matmul(second_merge_matrix.T[:, i*d_model:(i+1)*d_model], torch.matmul(ffn_all_w2[i*d_model:(i+1)*d_model], first_unmerge_matrix.T[:, i*d_ff:(i+1)*d_ff]))
+
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.w1.weight.data = ffn_w1
+    merged_ffn.w2.weight.data = ffn_w2
+    merged_ffn.w3.weight.data = ffn_w3
+
+    return merged_ffn
+
+
+@torch.no_grad()
+def collect_act(data, weight1, weight3=None):
+    activations = []
+    act = torch.nn.SiLU()
+    if weight3 is not None:
+        cur = act(torch.matmul(data, weight1.T)) * torch.matmul(data, weight3.T)
+    else:
+        cur = torch.matmul(data, weight1.T)
+    activations.append(cur.reshape(-1, cur.shape[-1]))
+    return torch.cat(activations, dim=0)
+
+@torch.no_grad()
+def compute_covariance(act1, act2):
+    mean1 = act1.mean(dim=0, keepdim=True)
+    mean2 = act2.mean(dim=0, keepdim=True)
+    std1 = act1.std(dim=0, keepdim=True)
+    std2 = act2.std(dim=0, keepdim=True)
+    corr_matrix = torch.matmul((act1 - mean1).T, act2 - mean2) / (act1.shape[0] - 1)
+    corr_matrix = corr_matrix / (std1.T * std2 + FP32_EPS)
+    return corr_matrix
+
+def compute_permutation(data, ffn_list, dom_ind):
+    dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].w1.weight.data, ffn_list[dominant_index].w3.weight.data)
+    group_indexes = []
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(forwarded_hidden_states, ffn_list[i].w1.weight.data, ffn_list[i].w3.weight.data)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
+    
+    permutation_matrix = torch.eye(d_ff, temp_dim).to(_device).to(torch.float16)
+    for i in range(d_ff):
+        for j in range(corr_matrix):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (i + 1)
+            permutation_matrix[i, index_in_this_group] = 1
+    permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    return permutation_matrix
+
+@torch.no_grad()
+def _merge_moe_experts_with_dominant(
+        ffn_list: List[MixtralBlockSparseTop2MLP],
+        forwarded_hidden_states: torch.Tensor,
+        mini_batch_size: Optional[int] = None,
+        alpha_for_repeated_merging: Optional[float] = 0.1,
+        average_coefs: Optional[List[float]] = None,
+        input_weight: Optional[List[float]] = None,
+        dominant_index: Optional[int] = 0,
+):
+    d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
+    num_ffn = len(ffn_list)
+
+    if dominant_index != 0:
+        ffn_list[0], ffn_list[dominant_index] = ffn_list[dominant_index], ffn_list[0]
+
+    _device = ffn_list[0].w1.weight.device
+    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
+    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+    print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {d_ff * num_ffn}, target_dim: {d_ff}, dominant_index: {dominant_index}")
+    # Compute Permutation Matrix for w1 and w3
+    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn).to(_device).to(torch.float16)
+    dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].w1.weight.data, ffn_list[dominant_index].w3.weight.data)
+    group_indexes = []
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(forwarded_hidden_states, ffn_list[i].w1.weight.data, ffn_list[i].w3.weight.data)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
+    for i in range(d_ff):
+        for j in range(num_ffn - 1):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (j + 1)
+            permutation_matrix[i, index_in_this_group] = 1
+    unmerge_1 = permutation_matrix
+    permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    print(f"first permutation_matrix: {permutation_matrix.shape} {permutation_matrix[0]}")
+    ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_w1 = torch.matmul(permutation_matrix, ffn_all_w1)
+    ffn_w3 = torch.matmul(permutation_matrix, ffn_all_w3)
+
+    del ffn_all_w1, ffn_all_w3
+
+    # Compute Permutation Matrix for w2
+    permutation_matrix = torch.eye(d_model, d_model * num_ffn).to(_device).to(torch.float16)
+    new_data = collect_act(forwarded_hidden_states, ffn_w1, ffn_w3)
+    dom_act = collect_act(new_data, ffn_list[dominant_index].w2.weight.data, None)
+    group_indexes.clear()
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(new_data, ffn_list[i].w2.weight.data, None)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
+    for i in range(d_model):
+        for j in range(num_ffn - 1):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_model * (j + 1)
+            permutation_matrix[i, index_in_this_group] = 1
+    unmerge_2 = permutation_matrix
+    permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    print(f"second permutation_matrix: {permutation_matrix.shape} {permutation_matrix[0]}")
+    ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=0) # (d_model * num_ffn, d_ff)
+    ffn_w2 = torch.zeros(d_model, d_ff).to(_device)
+    for i in range(num_ffn):
+        ffn_w2 += torch.matmul(permutation_matrix[:, i*d_model:(i+1)*d_model],
+            torch.matmul(ffn_all_w2[i*d_model:(i+1)*d_model], 
+                         unmerge_1[:, i*d_ff:(i+1)*d_ff])
+        )
+
+    del ffn_all_w2
+
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.w1.weight.data = ffn_w1
+    merged_ffn.w2.weight.data = ffn_w2
+    merged_ffn.w3.weight.data = ffn_w3
+
+    return merged_ffn
+
 @torch.no_grad()
 def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     ffn_list: List[MixtralBlockSparseTop2MLP],
@@ -1266,8 +1499,6 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     for handle in handles:
         handle.remove()
     del handles, forwarded_hidden_states
-
-    # print("Concat activations")
 
     # activations = []
     # for i in range(len(activations_dict[0])):
@@ -1385,6 +1616,7 @@ def _merge_moe_experts_within_and_across_models(
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
         print(f"\nGroup {label}: {expert_indices}")
+        core_expert_index = [i for i, idx in enumerate(expert_indices) if idx in core_expert_indices]
 
         if dominant_alone:
             group_core_expert_indices = torch.stack([
@@ -1425,7 +1657,7 @@ def _merge_moe_experts_within_and_across_models(
                 if usage_frequencies is not None:
                     core_usages = usage_frequencies[group_core_expert_indices]
                     non_core_usage_sum = torch.sum(non_core_usages).item()
-                merged_expert = merge_switch_mlp_by_activation_matching_within_and_across_models(
+                merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
                     ffn_list=[merged_expert] + [mlp.experts[expert_idx] for expert_idx in
                                                 group_core_expert_indices],
                     forwarded_hidden_states=group_forwarded_hidden_states,
@@ -1448,12 +1680,20 @@ def _merge_moe_experts_within_and_across_models(
             if len(expert_indices) == 1:
                 merged_expert = moe.experts[expert_indices[0]]
             else:
-                merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
+                # merged_expert = _merge_moe_experts_by_zipit(
+                #     ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                #     forwarded_hidden_states=group_forwarded_hidden_states,
+                #     mini_batch_size=5000,
+                #     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                #     input_weight=input_weight,
+                # )
+                merged_expert = _merge_moe_experts_with_dominant(
                     ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
                     forwarded_hidden_states=group_forwarded_hidden_states,
                     mini_batch_size=5000,
                     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                     input_weight=input_weight,
+                    dominant_index=core_expert_indices[0],
                 )
         moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
         moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
@@ -1579,6 +1819,7 @@ def merge_by_groups_within_and_across_models(
                 sparse_layer_indices,
                 desc=f"[Merging]Merging by groups within and across experts..."
         ):
+            _st = time.time()
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
             group_labels = grouper.group_state_dict()[ffn_name]
             layer_forwarded_hidden_states = tuple()
@@ -1613,7 +1854,8 @@ def merge_by_groups_within_and_across_models(
                 usage_frequencies=usage_frequencies[ffn_name] if usage_weighted else None,
             )
             del layer_forwarded_hidden_states
-            print(torch.cuda.memory_summary())
+            # print(torch.cuda.memory_summary())
+            print(f"Layer {layer_idx} took {time.time() - _st:2f} seconds")
 
     
     print(grouper.sparse_layer_indices)
@@ -1625,5 +1867,5 @@ def merge_by_groups_within_and_across_models(
         # snapshot = torch.cuda.memory._snapshot()
         # print(snapshot['segments'])
         # dump(snapshot, open(f"my_snapshot_{i}.pickle", "wb"))
-        print(torch.cuda.memory_summary())
+        # print(torch.cuda.memory_summary())
     return mixtral_model

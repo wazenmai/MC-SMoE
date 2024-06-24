@@ -185,3 +185,4 @@ mcsmoe/pruning/kprune.py
 mcsmoe/data/c4-train.00000-of-01024.json
 mcsmoe/pruning-mixtral.py
 scripts/mixtral/prune.sh
+*.pt
