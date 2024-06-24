@@ -10,4 +10,6 @@ COPY promptsource promptsource
 RUN pip install -e promptsource/
 COPY lm-evaluation-harness lm-evaluation-harness
 RUN pip install -e lm-evaluation-harness/
+COPY transformers transformers
+RUN pip install -e transformers/
 COPY . .
