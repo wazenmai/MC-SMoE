@@ -23,7 +23,7 @@ def evaluate_mcsmoe(
         model_name: Optional[str] = "mistralai/Mixtral-8x7B-v0.1",
         dominant: Optional[str] = "knowledge", # random, frequency, knowledge
         similarity_base: Optional[str] = "router-logits",
-        mode: Optional[str] = "normal", 
+        mode: Optional[str] = "normal", # normal, activation-with-router-logits, input-weight, update, dom-group
         merge: Optional[str] = "zipit", # zipit, freq
         num_fewshot: Optional[int] = 0,
         n_sentences: Optional[int] = 32,

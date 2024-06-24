@@ -442,7 +442,7 @@ class ExpertsGrouperForMixtral(object):
             model: MixtralForCausalLM,
             dataloader: DataLoader = None
     ):
-        if os.path.exists("similarity.pkl"):
+        if os.path.exists(f"{self.similarity_base}-similarity.pkl"):
             with open("similarity.pkl", "rb") as f:
                 self._similarity_state_dict = pickle.load(f)
             return
@@ -463,7 +463,7 @@ class ExpertsGrouperForMixtral(object):
             self._compute_all_similarities_by_expert_inputs_abs(model, dataloader)
         else:
             raise NotImplementedError
-        with open("similarity.pkl", "wb") as f:
+        with open(f"{self.similarity_base}-similarity.pkl", "wb") as f:
             pickle.dump(self._similarity_state_dict, f)
     
     def compute_similarities_layerwise(
@@ -1679,16 +1679,7 @@ def _merge_moe_experts_within_and_across_models(
             if len(expert_indices) == 1:
                 merged_expert = moe.experts[expert_indices[0]]
             else:
-                if mode == "normal":
-                    print("_merge_mixtral_moe_by_activation_matching_within_and_across_model")
-                    merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
-                        ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
-                        forwarded_hidden_states=group_forwarded_hidden_states,
-                        mini_batch_size=5000,
-                        average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
-                        input_weight=input_weight,
-                    )
-                elif mode == "update":
+                if mode == "update":
                     print("_merge_moe_experts_by_zipit")
                     merged_expert = _merge_moe_experts_by_zipit(
                         ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
@@ -1706,6 +1697,15 @@ def _merge_moe_experts_within_and_across_models(
                         average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                         input_weight=input_weight,
                         dominant_index=core_expert_indices[0],
+                    )
+                else:
+                    print("_merge_mixtral_moe_by_activation_matching_within_and_across_model")
+                    merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
+                        ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                        forwarded_hidden_states=group_forwarded_hidden_states,
+                        mini_batch_size=5000,
+                        average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                        input_weight=input_weight,
                     )
         moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
         moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
