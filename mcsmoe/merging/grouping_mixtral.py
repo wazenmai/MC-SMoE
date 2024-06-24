@@ -47,8 +47,8 @@ class ExpertsGrouperForMixtral(object):
         self.d_model = config.hidden_size
         self.d_ff = config.intermediate_size
         self.topk = config.num_experts_per_tok
-        # self.sparse_layer_indices = list(range(0, config.num_hidden_layers))
-        self.sparse_layer_indices = [config.num_hidden_layers - 1]
+        self.sparse_layer_indices = list(range(0, config.num_hidden_layers))
+        # self.sparse_layer_indices = [config.num_hidden_layers - 1]
         self.similarity_fn = SIMILARITY_MAPPING_FUNCTION[similarity_fn]
         self.similarity_base = similarity_base
         self._group_state_dict = None
@@ -1606,19 +1606,17 @@ def _merge_moe_experts_within_and_across_models(
 
     moe.expert_dict = {} # org expert idx: new expert idx
     input_weight = None
-
 #     torch.cuda.memory._record_memory_history(
 #         enabled="all",
 #         context="all",
 #         stacks="all",
 #    )
-
     # p = 0
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
         print(f"\nGroup {label}: {expert_indices}")
         core_expert_index = [i for i, idx in enumerate(expert_indices) if idx in core_expert_indices]
-
+        zipit_st = time.time()
         if dominant_alone:
             group_core_expert_indices = torch.stack([
                 idx for idx in expert_indices if idx in core_expert_indices
@@ -1681,21 +1679,34 @@ def _merge_moe_experts_within_and_across_models(
             if len(expert_indices) == 1:
                 merged_expert = moe.experts[expert_indices[0]]
             else:
-                merged_expert = _merge_moe_experts_by_zipit(
-                    ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
-                    forwarded_hidden_states=group_forwarded_hidden_states,
-                    mini_batch_size=5000,
-                    average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
-                    input_weight=input_weight,
-                )
-                # merged_expert = _merge_moe_experts_with_dominant(
-                #     ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
-                #     forwarded_hidden_states=group_forwarded_hidden_states,
-                #     mini_batch_size=5000,
-                #     average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
-                #     input_weight=input_weight,
-                #     dominant_index=core_expert_indices[0],
-                # )
+                if mode == "normal":
+                    print("_merge_mixtral_moe_by_activation_matching_within_and_across_model")
+                    merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
+                        ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                        forwarded_hidden_states=group_forwarded_hidden_states,
+                        mini_batch_size=5000,
+                        average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                        input_weight=input_weight,
+                    )
+                elif mode == "update":
+                    print("_merge_moe_experts_by_zipit")
+                    merged_expert = _merge_moe_experts_by_zipit(
+                        ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                        forwarded_hidden_states=group_forwarded_hidden_states,
+                        mini_batch_size=5000,
+                        average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                        input_weight=input_weight,
+                    )
+                elif mode == "dom-group":
+                    print("_merge_moe_experts_with_dominant")
+                    merged_expert = _merge_moe_experts_with_dominant(
+                        ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                        forwarded_hidden_states=group_forwarded_hidden_states,
+                        mini_batch_size=5000,
+                        average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                        input_weight=input_weight,
+                        dominant_index=core_expert_indices[0],
+                    )
         moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
         moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
         moe.experts[expert_indices[0].item()].w3.weight.copy_(merged_expert.w3.weight)
@@ -1707,6 +1718,7 @@ def _merge_moe_experts_within_and_across_models(
             # moe.experts[expert_idx] = moe.experts[expert_indices[0]]
             moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
             moe.experts[expert_idx.item()] = None
+        print(f"Merging takes {time.time() - zipit_st:.2f}s")
         
         # try:
         #     torch.cuda.memory._dump_snapshot(f"activation_{p}.pickle")
