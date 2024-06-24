@@ -726,9 +726,11 @@ class ExpertsGrouperForMixtral(object):
             for name, p in model.named_parameters():
                 if p.requires_grad_:
                     p.requires_grad_(False)
-            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(model.device)
+            experts = model.model.layers[layer_idx].block_sparse_moe.experts
+            _device = experts[0].w2.weight.device
+            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(_device)
             moe_masks.requires_grad_(True)
 
             # Zipit variables
@@ -739,7 +741,7 @@ class ExpertsGrouperForMixtral(object):
             _inputs = {}
 
             # 2.2 Register hook function
-            experts = model.model.layers[layer_idx].block_sparse_moe.experts
+            # experts = model.model.layers[layer_idx].block_sparse_moe.experts
             for e in range(self.num_experts):
                 # Apply layer mask
                 handles.append(
@@ -769,7 +771,7 @@ class ExpertsGrouperForMixtral(object):
                 outputs = model(**batch, output_router_logits=True)
                 router_logits = outputs.router_logits
                 
-                if layer_idx == 0:
+                if layer_idx == self.sparse_layer_indices[0]:
                     pred = F.softmax(outputs.logits / T, dim=1).detach()
                     kd_labels.append(pred.cpu())
                 else:
@@ -779,10 +781,10 @@ class ExpertsGrouperForMixtral(object):
                     input=F.log_softmax(outputs.logits / T, dim=1),
                     target=pred,
                     reduction="batchmean"
-                ) * (T ** 2) / 100
+                ) * (T ** 2)
 
-                if layer_idx >= 1:
-                    print(f"kl_div: {kl_div}")
+                if kl_div >= 100:
+                    kl_div /= 100
                 
                 # if num_samples <= 1:
                 #     print(torch.cuda.memory_summary())
@@ -807,7 +809,7 @@ class ExpertsGrouperForMixtral(object):
                     # get feature
                     token_id = (expert_index == e).nonzero()
                     number_of_tokens = token_id.shape[0]
-                    _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).cuda()
+                    _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).to(_device)
                     # for dim1 in range(_features.shape[0]):
                     #     for dim2 in range(_features.shape[1]):
                     #         if _features[dim1][dim2] >= 1:
@@ -846,7 +848,7 @@ class ExpertsGrouperForMixtral(object):
             # 2.5 Compute score
             moe_scores = (moe_rep_kl * lam_rep + moe_pred_kl * lam_pred).mean(dim=-1)
             print(f"\nmoe_scores: {moe_scores}")
-            if layer_idx == 0:
+            if layer_idx == self.sparse_layer_indices[0]:
                 kd_labels = torch.cat(kd_labels, dim=0)
                 print(f"kd_labels: {kd_labels.shape}")
 
