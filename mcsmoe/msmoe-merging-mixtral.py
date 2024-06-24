@@ -6,6 +6,7 @@ from typing import Optional
 
 import os
 import logging
+import time
 import torch
 from fire import Fire
 from transformers import MixtralForCausalLM, AutoTokenizer
@@ -65,12 +66,23 @@ def evaluate_mcsmoe(
 
     # MC-SMoE!
     print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
+    group_st = time.time()
 
     grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base)
     grouper.compute_all_similarities(model, dataloader_for_merging)
     
     if dominant == "random":
         grouper.group_experts_randomly(num_groups=num_average_groups)
+        model = merge_by_groups_within_and_across_models(
+            mixtral_model=model,
+            grouper=grouper,
+            dataloader=dataloader_for_merging,
+            mode=mode,
+            partition=partition,
+            dominant_alone=False,
+            usage_weighted=False
+        )
+        dom_experts = None
     elif dominant == "frequency":
         grouper.compute_all_usages(model, dataloader_for_merging)
         dom_experts = grouper.group_experts_globally_from_dominant_experts(
@@ -115,6 +127,8 @@ def evaluate_mcsmoe(
             print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
         
     del grouper
+
+    print(f"[MC-SMoE] Merging time: {time.time() - group_st:2f} seconds")
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):
