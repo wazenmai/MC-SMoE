@@ -174,15 +174,13 @@ mc_env/
 
 # 2024/06/02
 log_*
-log
+log*
 *.pickle
+*.pkl
 *temp*.py
 
 mcsmoe/data/c4*.json
 .deepspeed_env
 try.py
-mcsmoe/pruning/kprune.py
 mcsmoe/data/c4-train.00000-of-01024.json
-mcsmoe/pruning-mixtral.py
-scripts/mixtral/prune.sh
 *.pt
