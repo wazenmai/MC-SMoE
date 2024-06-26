@@ -127,7 +127,7 @@ def evaluate_mcsmoe(
         eval_size = [32, 32, 32, 16, 32, 12, 32, 32]
         for i, t in enumerate(task):
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", eval_batch_size=eval_size[i], log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_size[i], log=True
             )
 
 
