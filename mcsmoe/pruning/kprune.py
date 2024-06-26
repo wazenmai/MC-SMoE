@@ -14,6 +14,7 @@ class KPruner(object):
     def __init__(
             self,
             config,
+            start_layer,
             reconstruct_batch_size,
             lam_pred,   # coef for predictive knowledge
             lam_rep,    # coef for representative knowledge
@@ -35,7 +36,7 @@ class KPruner(object):
         self.d_head = self.d_model // self.num_heads
         self.d_ff = config.intermediate_size
         self.topk = config.num_experts_per_tok # for mixtral
-        self.prune_layer_indices = [i for i in range(0, self.num_layers)]
+        self.prune_layer_indices = [i for i in range(start_layer, self.num_layers)]
 
         self.f_moe = self.d_ff * self.d_model * 3 * self.num_experts
         self.f_expert = self.d_ff * self.d_model * 3
@@ -62,14 +63,18 @@ class KPruner(object):
 
         # STEP: 1. compute knowledge
         # 1.1 Initialization
-        moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-        moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-        moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(model.device)
+        moe = model.model.layers[layer_idx].block_sparse_moe
+        experts = model.model.layers[layer_idx].block_sparse_moe.experts
+        
+        _device = experts[0].w2.weight.device
+        moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+        moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
+        moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(_device)
         moe_masks.requires_grad_(True)
 
         handles = []
         _inputs = {} # input fo single expert- compute score
-        layer_inputs = [] # input for layer - reconstruction
+        # layer_inputs = [] # input for layer - reconstruction
         expert_activations = {} # input for expert's output_proj  - reconstruction
         router_logits_rc = [] # router logits of moe layer - reconstruction
         expert_index_rc = [] # expert index of moe layer - reconstruction
@@ -104,11 +109,10 @@ class KPruner(object):
             return handle
 
         # 1.2 Register hook function
-        moe = model.model.layers[layer_idx].block_sparse_moe
-        experts = model.model.layers[layer_idx].block_sparse_moe.experts
-        handles.append(
-            hijack(moe, layer_inputs, _hijack_input=True)
-        )
+        
+        # handles.append(
+        #     hijack(moe, layer_inputs, _hijack_input=True)
+        # )
         for e in range(self.num_experts):
             # Apply mask - expert
             handles.append(
@@ -171,15 +175,14 @@ class KPruner(object):
             routing_weights, selected_experts = torch.topk(routing_weights, self.topk, dim=-1)
             # routing_weights = remove_paddings(routing_weights, att_mask)
             # expert_index = remove_paddings(selected_experts, att_mask)
-            router_logits_rc.append(routing_weights)
-            expert_index_rc.append(selected_experts)
+            router_logits_rc.append(routing_weights.to(_device))
+            expert_index_rc.append(selected_experts.to(_device))
             for e in range(self.num_experts):
                 _weight = model.model.layers[layer_idx].block_sparse_moe.experts[e].w2.weight
                 token_id = (selected_experts == e).nonzero()
                 number_of_tokens = token_id.shape[0]
-                _features = _inputs[e][-1][:number_of_tokens].to(_weight.device)
-                if layer_idx >= 2:
-                    print(f"_features: {torch.max(_features)}")
+                _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).to(_weight.device)
+                print(f"_features: {torch.max(_features)}")
                 expert_activations[e].append(_features)
                 moe_rep_kl[e] += ((_features ** 2).sum(dim=0) * (_weight ** 2).mean(dim=0)).data
 
@@ -190,7 +193,7 @@ class KPruner(object):
 
         # 1.4 Averaging score
         moe_rep_kl /= num_samples
-        moe_pred_kl /= num_tokens
+        moe_pred_kl /= num_tokens.to(_device)
 
         print(f"moe_rep_kl: {moe_rep_kl.shape} {moe_rep_kl}")
         print(f"moe_pred_kl: {moe_pred_kl.shape} {moe_pred_kl}")
@@ -247,19 +250,20 @@ class KPruner(object):
         # print(f"layer_inputs: {len(layer_inputs)} {layer_inputs[0].shape}")
         print(f"expert_activations: ({len(expert_activations)}, {len(expert_activations[e])}, {expert_activations[0][0].shape}, {expert_activations[1][0].shape})")
         print(f"router_logits_rc: ({len(router_logits_rc)}, {router_logits_rc[0].shape})")
-        # print(f"expert_index_rc: {len(expert_index_rc)} {len(expert_index_rc[0])} {expert_index_rc[0][0].shape}")
-        # print(f"kd_outputs[layer_idx]: {len(kd_outputs[layer_idx])} {kd_outputs[layer_idx][0].shape}")
+        print(f"expert_index_rc: {len(expert_index_rc)} {len(expert_index_rc[0])} {expert_index_rc[0][0].shape}")
+        print(f"kd_outputs[layer_idx]: {len(kd_outputs[layer_idx])} {kd_outputs[layer_idx][0].shape}")
 
         print(f"({layer_idx:2d}) [MoE] {(~pruning_mask).sum().item()} neurons pruned")
 
         num_batches = len(router_logits_rc)
         target_device = experts[e].w2.weight.device
+        compute_device = torch.device("cuda:7")
         mse = torch.nn.MSELoss()
 
         expert_input = []
         for b in range(num_batches):
             num_tokens = router_logits_rc[b].shape[0]
-            batch_input = torch.zeros(num_tokens, self.num_experts * left_neurons, dtype=torch.float, device=target_device)
+            batch_input = torch.zeros(num_tokens, self.num_experts * left_neurons, dtype=torch.float, device=compute_device)
             token_index_for_each_experts = [0 for _ in range(self.num_experts)]
             for t in range(num_tokens):
                 first_expert = expert_index_rc[b][t][0].item()
@@ -269,25 +273,27 @@ class KPruner(object):
                 token_index_for_each_experts[first_expert] += 1
                 token_index_for_each_experts[second_expert] += 1
             expert_input.append(batch_input)
-        expert_input = torch.cat(expert_input, dim=0).to(torch.float).to(target_device)
-        del layer_inputs, expert_activations, router_logits_rc, expert_index_rc
+        expert_input = torch.cat(expert_input, dim=0).to(torch.float)
+        del expert_activations, router_logits_rc, expert_index_rc
 
         for dim in range(0, self.d_model, self.reconstruct_batch_size):
-            expert_output = torch.cat([
-                kd_outputs[layer_idx][b][:, dim:dim + self.reconstruct_batch_size].reshape(-1, self.reconstruct_batch_size)
-                for b in range(num_batches)
-            ], dim=0).to(torch.float).to(target_device)
-            res = torch.linalg.lstsq(expert_input, expert_output, rcond=0.)
             print(f"Dimension {dim} / {self.d_model}")
-            W_new = res.solution.to(target_device).T
+            expert_output = torch.cat([
+                kd_outputs[layer_idx][b][:, :, dim:dim + self.reconstruct_batch_size].reshape(-1, self.reconstruct_batch_size)
+                for b in range(num_batches)
+            ], dim=0).to(torch.float).to(compute_device)
+            res = torch.linalg.lstsq(expert_input, expert_output, rcond=0.)
+            W_new = res.solution.T
             print(f"W_new: {W_new.shape} {torch.isnan(W_new).sum()} {torch.isinf(W_new).sum()} {torch.max(W_new)} {torch.min(W_new)} {torch.mean(W_new)}")
             residuals = mse(expert_input @ W_new.T, expert_output)
             print(f"residuals: {residuals}")
-
+            W_new.to(target_device)
+            del expert_output
             for e in range(self.num_experts):
                 # d_model * d_ff -> d_model * left_neurons
                 experts[e].w2.weight[dim:dim + self.reconstruct_batch_size] = W_new[:, e * left_neurons : (e + 1) * left_neurons]
-
+        del expert_input
+        torch.cuda.empty_cache()
 
         # for dim in range(0, self.d_model, self.reconstruct_batch_size):
         #     expert_input = []
@@ -372,6 +378,7 @@ class KPruner(object):
         #         experts[e].w2.weight[dim:dim + self.reconstruct_batch_size] = W_new[:, e * left_neurons : (e + 1) * left_neurons]
         
         print(f"[Pruning] Time: {time.time() - _st:.2f}s")
+        kd_outputs[layer_idx].clear()
         del kd_outputs[layer_idx]
         print(torch.cuda.memory_summary())
 

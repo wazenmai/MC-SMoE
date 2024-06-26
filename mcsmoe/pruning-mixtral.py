@@ -22,8 +22,10 @@ def pruning_mixtral(
     T: Optional[float] = 2.0,
     train_batch_size: Optional[int] = 4,
     eval_batch_size: Optional[int] = 32,
-    reconstruct_batch_size: Optional[int] = 256,
+    reconstruct_batch_size: Optional[int] = 1024,
+    start_layer: Optional[int] = 0,
     n_sentences: Optional[int] = 32,
+    model_path: Optional[str] = None,
 ):
     print(f"Prune model with constraint {constraint} on {task}.\n Model: {model_name}\n train_batch_size={train_batch_size}, eval_batch_size={eval_batch_size}, lam_pred={lam_pred}, lam_rep={lam_rep}, T={T}")
 
@@ -35,6 +37,8 @@ def pruning_mixtral(
         model_name,
         torch_dtype=torch.float16, device_map="auto"
     )
+    if model_path is not None:
+        model.load_state_dict(torch.load(model_path))
     model.eval()
 
     dataloader = get_calib_dataloder(
@@ -48,6 +52,7 @@ def pruning_mixtral(
 
     pruner = KPruner(
         config=model.config,
+        start_layer=start_layer,
         reconstruct_batch_size=reconstruct_batch_size,
         lam_pred=lam_pred,
         lam_rep=lam_rep,
@@ -72,9 +77,11 @@ def pruning_mixtral(
             model, tokenizer=tokenizer, task=task, num_fewshot=0, output_path=output_path, log=True
         )
     else:
-        for t in task:
+        tasks = ["openbookqa", "rte", "winogrande", "arc_challenge", "arc_easy", "boolq", "hellaswag", "mmlu"]
+        eval_batch_sizes = [32, 32, 32, 32, 32, 16, 32, 16]
+        for i, t in enumerate(tasks):
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=0, eval_batch_size=eval_batch_size, log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=0, eval_batch_size=eval_batch_sizes[i], log=True
             )
     
     print(f"THE END: {time.time()-whole_start:.2f} sec.")
