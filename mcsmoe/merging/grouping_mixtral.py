@@ -443,7 +443,7 @@ class ExpertsGrouperForMixtral(object):
             dataloader: DataLoader = None
     ):
         if os.path.exists(f"{self.similarity_base}-similarity.pkl"):
-            with open("similarity.pkl", "rb") as f:
+            with open(f"{self.similarity_base}-similarity.pkl", "rb") as f:
                 self._similarity_state_dict = pickle.load(f)
             return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
@@ -472,10 +472,6 @@ class ExpertsGrouperForMixtral(object):
         layer_idx: int,
         dataloader: DataLoader = None
     ):
-        # if os.path.exists("similarity.pkl"):
-        #     with open("similarity.pkl", "rb") as f:
-        #         self._similarity_state_dict = pickle.load(f)
-        #     return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -491,9 +487,6 @@ class ExpertsGrouperForMixtral(object):
             self._compute_layer_similarities_by_expert_outputs(model, dataloader, layer_idx)
         else:
             raise NotImplementedError
-        
-        # with open("similarity.pkl", "wb") as f:
-        #     pickle.dump(self._similarity_state_dict, f)
 
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE]  Computing similarities by weight..."):
@@ -1696,7 +1689,7 @@ def _merge_moe_experts_within_and_across_models(
                         mini_batch_size=5000,
                         average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                         input_weight=input_weight,
-                        dominant_index=core_expert_indices[0],
+                        dominant_index=core_expert_index[0],
                     )
                 else:
                     print("_merge_mixtral_moe_by_activation_matching_within_and_across_model")
