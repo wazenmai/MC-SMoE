@@ -29,6 +29,7 @@ def evaluate_mcsmoe(
         eval_batch_size: Optional[int] = 32,
         partition: Optional[int] = 1,
         output_path: Optional[str] = None,
+        result_path: Optional[str] = None,
 ):
     print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
 
@@ -127,7 +128,7 @@ def evaluate_mcsmoe(
         eval_size = [32, 32, 32, 16, 32, 12, 32, 32]
         for i, t in enumerate(task):
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_size[i], log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_size[i], output_path=result_path, log=True
             )
 
 
