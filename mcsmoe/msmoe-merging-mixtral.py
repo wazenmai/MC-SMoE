@@ -85,6 +85,7 @@ def evaluate_mcsmoe(
         dom_experts = None
     elif dominant == "frequency":
         grouper.compute_all_usages(model, dataloader_for_merging)
+        print(grouper.usage_frequency_state_dict())
         dom_experts = grouper.group_experts_globally_from_dominant_experts(
             num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
         )
@@ -100,6 +101,7 @@ def evaluate_mcsmoe(
                 mode=mode,
                 partition=partition,
                 dominant_alone=False,
+                core_experts=dom_experts,
                 usage_weighted=False
             )
     elif dominant == "knowledge":
@@ -129,6 +131,9 @@ def evaluate_mcsmoe(
     del grouper
 
     print(f"[MC-SMoE] Merging time: {time.time() - group_st:2f} seconds")
+
+    if num_average_groups < model.config.num_experts_per_tok:
+        model.config.num_experts_per_tok = num_average_groups
 
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):

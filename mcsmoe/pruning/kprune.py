@@ -124,12 +124,12 @@ class KPruner(object):
                 hijack(experts[e].w2, _inputs[e], _hijack_input=True)
             )
             expert_activations[e] = []
-        if layer_idx == self.prune_layer_indices[0]:
-            for sl in self.prune_layer_indices:
-                kd_outputs[sl] = []
-                handles.append(
-                    hijack(model.model.layers[sl].block_sparse_moe, kd_outputs[sl], _hijack_input=False)
-                )
+        # if layer_idx == self.prune_layer_indices[0]:
+        #     for sl in self.prune_layer_indices:
+        #         kd_outputs[sl] = []
+        #         handles.append(
+        #             hijack(model.model.layers[sl].block_sparse_moe, kd_outputs[sl], _hijack_input=False)
+        #         )
 
         # 1.3 Forward pass
         num_tokens = 0
@@ -175,15 +175,15 @@ class KPruner(object):
             routing_weights, selected_experts = torch.topk(routing_weights, self.topk, dim=-1)
             # routing_weights = remove_paddings(routing_weights, att_mask)
             # expert_index = remove_paddings(selected_experts, att_mask)
-            router_logits_rc.append(routing_weights.to(_device))
-            expert_index_rc.append(selected_experts.to(_device))
+            # router_logits_rc.append(routing_weights.to(_device))
+            # expert_index_rc.append(selected_experts.to(_device))
             for e in range(self.num_experts):
                 _weight = model.model.layers[layer_idx].block_sparse_moe.experts[e].w2.weight
                 token_id = (selected_experts == e).nonzero()
                 number_of_tokens = token_id.shape[0]
                 _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).to(_weight.device)
                 print(f"_features: {torch.max(_features)}")
-                expert_activations[e].append(_features)
+                # expert_activations[e].append(_features)
                 moe_rep_kl[e] += ((_features ** 2).sum(dim=0) * (_weight ** 2).mean(dim=0)).data
 
                 grad = moe_masks.grad[e]
@@ -248,6 +248,7 @@ class KPruner(object):
                 # kd_outputs[layer_idx]: Output of moe layer (B, T, d_model)
         
         # print(f"layer_inputs: {len(layer_inputs)} {layer_inputs[0].shape}")
+        """
         print(f"expert_activations: ({len(expert_activations)}, {len(expert_activations[e])}, {expert_activations[0][0].shape}, {expert_activations[1][0].shape})")
         print(f"router_logits_rc: ({len(router_logits_rc)}, {router_logits_rc[0].shape})")
         print(f"expert_index_rc: {len(expert_index_rc)} {len(expert_index_rc[0])} {expert_index_rc[0][0].shape}")
@@ -257,7 +258,7 @@ class KPruner(object):
 
         num_batches = len(router_logits_rc)
         target_device = experts[e].w2.weight.device
-        compute_device = torch.device("cuda:7")
+        compute_device = torch.device("cuda:0") # torch.device("cuda:7")
         mse = torch.nn.MSELoss()
 
         expert_input = []
@@ -294,6 +295,7 @@ class KPruner(object):
                 experts[e].w2.weight[dim:dim + self.reconstruct_batch_size] = W_new[:, e * left_neurons : (e + 1) * left_neurons]
         del expert_input
         torch.cuda.empty_cache()
+        """
 
         # for dim in range(0, self.d_model, self.reconstruct_batch_size):
         #     expert_input = []
@@ -378,8 +380,8 @@ class KPruner(object):
         #         experts[e].w2.weight[dim:dim + self.reconstruct_batch_size] = W_new[:, e * left_neurons : (e + 1) * left_neurons]
         
         print(f"[Pruning] Time: {time.time() - _st:.2f}s")
-        kd_outputs[layer_idx].clear()
-        del kd_outputs[layer_idx]
+        # kd_outputs[layer_idx].clear()
+        # del kd_outputs[layer_idx]
         print(torch.cuda.memory_summary())
 
     
