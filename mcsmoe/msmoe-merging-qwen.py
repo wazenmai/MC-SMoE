@@ -33,12 +33,14 @@ def evaluate_mcsmoe(
     print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
 
     eval_ppl = (task == "minipile")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B-Chat")
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = Qwen2MoeForCausalLM.from_pretrained(
-        model_name,
+        "Qwen/Qwen1.5-MoE-A2.7B-Chat",
         torch_dtype=torch.float16, device_map="auto"
     )
+    if model_name != "Qwen/Qwen1.5-MoE-A2.7B-Chat":
+        model.load_state_dict(torch.load(model_name))
     model.eval()
 
     # dataloader_for_merging = get_minipile_dataloder(
@@ -57,60 +59,61 @@ def evaluate_mcsmoe(
     )
 
     # MC-SMoE!
-    print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
-    grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
-    grouper.compute_all_similarities(model, dataloader_for_merging)
-    
-    if dominant == "random":
-        grouper.group_experts_randomly(num_groups=num_average_groups)
-        # Freq-merge
-        model = merge_by_groups_with_usage_weighted(
-            model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
-        )
-    elif dominant == "frequency":
-        grouper.compute_all_usages(model, dataloader_for_merging)
-        dom_experts = grouper.group_experts_globally_from_dominant_experts(
-            num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
-        )
-        if merge == "freq":
+    if merge != "no":
+        print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
+        grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
+        grouper.compute_all_similarities(model, dataloader_for_merging)
+        
+        if dominant == "random":
+            grouper.group_experts_randomly(num_groups=num_average_groups)
+            # Freq-merge
             model = merge_by_groups_with_usage_weighted(
                 model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
             )
-        else:
-            model = merge_by_groups_within_and_across_models(
-                qwen_model=model,
-                grouper=grouper,
-                dataloader=dataloader_for_merging,
-                mode=mode,
-                dominant_alone=False,
-                usage_weighted=False
+        elif dominant == "frequency":
+            grouper.compute_all_usages(model, dataloader_for_merging)
+            dom_experts = grouper.group_experts_globally_from_dominant_experts(
+                num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
             )
-    elif dominant == "knowledge":
-        model = grouper.all_in_one_knowledge_dominant(
-            model=model, 
-            dataloader=dataloader_for_merging, 
-            mode=mode,
-            num_groups=num_average_groups,
-        )
-        dom_experts = grouper.core_experts
-    else:
-        raise ValueError(f"Unknown dominant type: {dominant}")
-    
-
-
-    print(f"[MC-SMoE] ========= Grouping results ========= ")
-    for name, state in grouper.group_state_dict().items():
-        if dom_experts is None:
-            print(f"Group {name}: {state.tolist()}")
+            if merge == "freq":
+                model = merge_by_groups_with_usage_weighted(
+                    model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+                )
+            else:
+                model = merge_by_groups_within_and_across_models(
+                    qwen_model=model,
+                    grouper=grouper,
+                    dataloader=dataloader_for_merging,
+                    mode=mode,
+                    dominant_alone=False,
+                    usage_weighted=False
+                )
+        elif dominant == "knowledge":
+            model = grouper.all_in_one_knowledge_dominant(
+                model=model, 
+                dataloader=dataloader_for_merging, 
+                mode=mode,
+                num_groups=num_average_groups,
+            )
+            dom_experts = grouper.core_experts
         else:
-            print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
+            raise ValueError(f"Unknown dominant type: {dominant}")
+        
 
-    del grouper
 
-    print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    torch.save(model.state_dict(), output_path+"/model.pth")
+        print(f"[MC-SMoE] ========= Grouping results ========= ")
+        for name, state in grouper.group_state_dict().items():
+            if dom_experts is None:
+                print(f"Group {name}: {state.tolist()}")
+            else:
+                print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
+
+        del grouper
+
+        print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        torch.save(model.state_dict(), output_path+"/model.pth")
 
     if eval_ppl:
         evaluate_minipile_perplexity(
