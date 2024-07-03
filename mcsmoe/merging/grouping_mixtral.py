@@ -772,11 +772,8 @@ class ExpertsGrouperForMixtral(object):
                     reduction="batchmean"
                 ) * (T ** 2)
 
-                if kl_div > 10:
+                if kl_div >= 100:
                     kl_div /= 100
-
-                if layer_idx >= 1:
-                    print(f"kl_div: {kl_div}")
                 
                 # if num_samples <= 1:
                 #     print(torch.cuda.memory_summary())

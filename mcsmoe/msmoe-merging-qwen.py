@@ -40,7 +40,7 @@ def evaluate_mcsmoe(
         "Qwen/Qwen1.5-MoE-A2.7B-Chat",
         torch_dtype=torch.float16, device_map="auto"
     )
-    if merge == "no":
+    if model_name != "Qwen/Qwen1.5-MoE-A2.7B-Chat":
         model.load_state_dict(torch.load(model_name))
     model.eval()
 
@@ -61,7 +61,8 @@ def evaluate_mcsmoe(
             num_workers=4,
         )
 
-        # MC-SMoE!
+    # MC-SMoE!
+    if merge != "no":
         print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
         grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
         grouper.compute_all_similarities(model, dataloader_for_merging)
@@ -100,6 +101,8 @@ def evaluate_mcsmoe(
             dom_experts = grouper.core_experts
         else:
             raise ValueError(f"Unknown dominant type: {dominant}")
+        
+
 
         print(f"[MC-SMoE] ========= Grouping results ========= ")
         for name, state in grouper.group_state_dict().items():
