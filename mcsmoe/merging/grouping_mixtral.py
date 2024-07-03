@@ -442,10 +442,10 @@ class ExpertsGrouperForMixtral(object):
             model: MixtralForCausalLM,
             dataloader: DataLoader = None
     ):
-        if os.path.exists(f"{self.similarity_base}-similarity.pkl"):
-            with open(f"{self.similarity_base}-similarity.pkl", "rb") as f:
-                self._similarity_state_dict = pickle.load(f)
-            return
+        # if os.path.exists(f"{self.similarity_base}-similarity.pkl"):
+        #     with open(f"{self.similarity_base}-similarity.pkl", "rb") as f:
+        #         self._similarity_state_dict = pickle.load(f)
+        #     return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -463,8 +463,8 @@ class ExpertsGrouperForMixtral(object):
             self._compute_all_similarities_by_expert_inputs_abs(model, dataloader)
         else:
             raise NotImplementedError
-        with open(f"{self.similarity_base}-similarity.pkl", "wb") as f:
-            pickle.dump(self._similarity_state_dict, f)
+        # with open(f"{self.similarity_base}-similarity.pkl", "wb") as f:
+        #     pickle.dump(self._similarity_state_dict, f)
     
     def compute_similarities_layerwise(
         self,
