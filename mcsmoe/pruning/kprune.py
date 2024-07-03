@@ -178,7 +178,7 @@ class KPruner(object):
                 number_of_tokens = token_id.shape[0]
                 _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).to(_weight.device)
                 print(f"_features: {torch.max(_features)}")
-                if self.reconstruct
+                if self.reconstruct:
                     expert_activations[e].append(_features)
                 moe_rep_kl[e] += ((_features ** 2).sum(dim=0) * (_weight ** 2).mean(dim=0)).data
 
