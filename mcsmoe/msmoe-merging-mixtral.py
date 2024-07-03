@@ -30,6 +30,7 @@ def evaluate_mcsmoe(
         train_batch_size: Optional[int] = 4,
         eval_batch_size: Optional[int] = 32,
         partition: Optional[int] = 1,
+        start_layer: Optional[int] = 0,
         output_path: Optional[str] = None,
 ):
     print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
@@ -68,7 +69,7 @@ def evaluate_mcsmoe(
     print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
     group_st = time.time()
 
-    grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base)
+    grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base, start_layer=start_layer)
     grouper.compute_all_similarities(model, dataloader_for_merging)
     
     if dominant == "random":
@@ -146,7 +147,7 @@ def evaluate_mcsmoe(
     else:
         for t in task:
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_batch_size, log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_batch_size, output_path=output_path, log=True
             )
 
 

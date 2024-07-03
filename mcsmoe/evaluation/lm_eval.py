@@ -62,35 +62,43 @@ def evaluate_fewshot(
     )
 
     if output_path:
-        path = Path(output_path)
-        # check if file or 'dir/results.json' exists
-        if path.is_file() or Path(output_path).joinpath("results.json").is_file():
-            print(
-                f"File already exists at {path}. Results will be overwritten."
-            )
-            output_path_file = path.joinpath("results.json")
-            assert not path.is_file(), "File already exists"
-        # if path json then get parent dir
-        elif path.suffix in (".json", ".jsonl"):
-            output_path_file = path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path = path.parent
-        else:
-            path.mkdir(parents=True, exist_ok=True)
-            output_path_file = path.joinpath("results.json")
-    else:
-        output_path_file = None
+        f = open(os.join(output_path, "results.log"), "w")
 
-    dumped = json.dumps(
-        results, indent=2, default=_handle_non_serializable, ensure_ascii=False
-    )
+    # if output_path:
+    #     path = Path(output_path)
+    #     # check if file or 'dir/results.json' exists
+    #     if path.is_file() or Path(output_path).joinpath("results.json").is_file():
+    #         print(
+    #             f"File already exists at {path}. Results will be overwritten."
+    #         )
+    #         output_path_file = path.joinpath("results.json")
+    #         assert not path.is_file(), "File already exists"
+    #     # if path json then get parent dir
+    #     elif path.suffix in (".json", ".jsonl"):
+    #         output_path_file = path
+    #         path.parent.mkdir(parents=True, exist_ok=True)
+    #         path = path.parent
+    #     else:
+    #         path.mkdir(parents=True, exist_ok=True)
+    #         output_path_file = path.joinpath("results.json")
+    # else:
+    #     output_path_file = None
 
-    if output_path:
-        output_path_file.open("w").write(dumped)
+    # dumped = json.dumps(
+    #     results, indent=2, default=_handle_non_serializable, ensure_ascii=False
+    # )
+
+    # if output_path:
+    #     output_path_file.open("w").write(dumped)
 
     if log:
         print(make_table(results))
+        print(make_table(results), file=f)
         if "groups" in results:
             print(make_table(results, "groups"))
+            print(make_table(results, "groups"), file=f)
+    
+    if output_path:
+        f.close()
 
     return results
