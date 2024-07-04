@@ -36,6 +36,7 @@ class ExpertsGrouperForMixtral(object):
             similarity_fn: str = "cosine",
             similarity_base: str = "router-logits",
             group_limit: int = 4,
+            data_limit: int = 50000,
     ):
         if similarity_fn not in SIMILARITY_MAPPING_FUNCTION:
             raise ValueError(
@@ -51,6 +52,7 @@ class ExpertsGrouperForMixtral(object):
         self.topk = config.num_experts_per_tok
         self.sparse_layer_indices = list(range(start_layer, config.num_hidden_layers))
         self.group_limit = group_limit
+        self.data_limit = data_limit
 
         self.similarity_fn = SIMILARITY_MAPPING_FUNCTION[similarity_fn]
         self.similarity_base = similarity_base
@@ -148,8 +150,8 @@ class ExpertsGrouperForMixtral(object):
         frequency_threshold = sorted_usage_frequency[total_num_groups]
         print(f"[MC-SMoE] Frequency threshold: {frequency_threshold}")
 
-        if frequency_threshold == 1.0:
-            raise ValueError("[MC-SMoE] The number of groups is too large, please reduce the number of groups.")
+        # if frequency_threshold == 1.0:
+        #     raise ValueError("[MC-SMoE] The number of groups is too large, please reduce the number of groups.")
 
         for i, layer_idx in enumerate(self.sparse_layer_indices):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
@@ -649,7 +651,7 @@ class ExpertsGrouperForMixtral(object):
             raise NotImplementedError
       
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
-        for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE]  Computing similarities by weight..."):
+        for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by weight..."):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
             for i in range(self.num_experts):
                 for j in range(i + 1, self.num_experts):
@@ -1089,7 +1091,7 @@ class ExpertsGrouperForMixtral(object):
             del layer_forwarded_hidden_states
             forwarded_hidden_states = []
             print(f"[Process-End] === Layer {layer_idx} / {len(self.sparse_layer_indices)}, {time.time() - _st:2f}s ===")
-        
+            print(torch.cuda.memory_summary())
         self.core_experts = core_experts
 
         return model
@@ -1435,8 +1437,6 @@ def _merge_moe_experts_by_zipit(
     act = torch.nn.SiLU()
 
     _device = ffn_list[0].w1.weight.device
-    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:30000]]
     forwarded_hidden_states = forwarded_hidden_states.to(_device)
     print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {temp_dim}, target_dim: {d_ff}")
 
@@ -1504,7 +1504,7 @@ def compute_permutation(data, ffn_list, dom_ind):
     
     permutation_matrix = torch.eye(d_ff, temp_dim).to(_device).to(torch.float16)
     for i in range(d_ff):
-        for j in range(corr_matrix):
+        for j in range(corr_matrix.shape[1]):
             index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (i + 1)
             permutation_matrix[i, index_in_this_group] = 1
     permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
@@ -1527,8 +1527,6 @@ def _merge_moe_experts_with_dominant(
         ffn_list[0], ffn_list[dominant_index] = ffn_list[dominant_index], ffn_list[0]
 
     _device = ffn_list[0].w1.weight.device
-    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
     forwarded_hidden_states = forwarded_hidden_states.to(_device)
     print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {d_ff * num_ffn}, target_dim: {d_ff}, dominant_index: {dominant_index}")
     # Compute Permutation Matrix for w1 and w3
@@ -1655,8 +1653,6 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
 
     print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape}")
     
-    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:50000]]
     concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
     
 
@@ -1813,6 +1809,7 @@ def _merge_moe_experts_within_and_across_models(
         core_expert_indices: Optional[List[int]] = None,
         usage_frequencies: Optional[torch.Tensor] = None,
         moe_scores: Optional[torch.Tensor] = None,
+        data_limit: Optional[int] = 50000,
 ) -> MixtralSparseMoeBlock:
 
     # moe.expert_dict = {} # org expert idx: new expert idx
@@ -1884,6 +1881,8 @@ def _merge_moe_experts_within_and_across_models(
             group_forwarded_hidden_states = torch.cat([
                 forwarded_hidden_states[expert_idx] for expert_idx in expert_indices
             ], dim=0)
+            randperm_indices = torch.randperm(group_forwarded_hidden_states.shape[0])
+            group_forwarded_hidden_states = group_forwarded_hidden_states[randperm_indices[:data_limit]]
             if len(expert_indices) == 1:
                 merged_expert = moe.experts[expert_indices[0]]
             else:
@@ -1917,6 +1916,7 @@ def _merge_moe_experts_within_and_across_models(
                         average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                         input_weight=input_weight,
                     )
+            print(torch.cuda.memory_summary())
                 
         # moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
         # moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
@@ -1929,18 +1929,7 @@ def _merge_moe_experts_within_and_across_models(
             moe.experts[expert_idx] = moe.experts[expert_indices[0]]
             # moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
             # moe.experts[expert_idx.item()] = None
-        
-        # try:
-        #     torch.cuda.memory._dump_snapshot(f"activation_{p}.pickle")
-        # except Exception as e:
-        #     print(f"Failed to capture memory snapshot {e}")
-        # p += 1
-
-    # Stop recording memory snapshot history.
-    # torch.cuda.memory._record_memory_history(enabled=None)
-    
     # print(moe.expert_dict)
-
     # moe.forward = MethodType(merged_moe_forward, moe)
     return moe
 
@@ -2003,7 +1992,7 @@ def merge_by_groups_within_and_across_models(
     def _get_activation_hook(name):
         #TODO: check if the length is outofbound
         def hook(module, input, output):
-            forwarded_hidden_states[name].append(input[0].detach().reshape(-1, input[0].shape[-1])) # .cpu()
+            forwarded_hidden_states[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1])) # .cpu()
         return hook
     
     # Since OOM, We can devide it into 2 parts
@@ -2075,9 +2064,10 @@ def merge_by_groups_within_and_across_models(
                 mode=mode,
                 core_expert_indices=core_experts[ffn_name] if core_experts is not None else None,
                 usage_frequencies=usage_frequencies[ffn_name] if usage_weighted else None,
+                data_limit=grouper.data_limit,
             )
             del layer_forwarded_hidden_states
-            # print(torch.cuda.memory_summary())
+            hidden_states_list.clear()
             print(f"Layer {layer_idx} took {time.time() - _st:2f} seconds")
 
     
