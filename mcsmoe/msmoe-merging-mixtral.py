@@ -23,7 +23,7 @@ def evaluate_mcsmoe(
         model_name: Optional[str] = "mistralai/Mixtral-8x7B-v0.1",
         dominant: Optional[str] = "knowledge", # random, frequency, knowledge
         similarity_base: Optional[str] = "router-logits",
-        mode: Optional[str] = "normal", 
+        mode: Optional[str] = "normal", # normal, activation-with-router-logits, input-weight, update, dom-group
         merge: Optional[str] = "zipit", # zipit, freq
         num_fewshot: Optional[int] = 0,
         n_sentences: Optional[int] = 32,
@@ -32,6 +32,7 @@ def evaluate_mcsmoe(
         partition: Optional[int] = 1,
         start_layer: Optional[int] = 0,
         output_path: Optional[str] = None,
+        result_path: Optional[str] = None,
         group_limit: Optional[int] = 4,
         data_limit: Optional[int] = 50000,
 ):
@@ -88,6 +89,7 @@ def evaluate_mcsmoe(
         dom_experts = None
     elif dominant == "frequency":
         grouper.compute_all_usages(model, dataloader_for_merging)
+        print(grouper.usage_frequency_state_dict())
         torch.cuda.empty_cache()
         dom_experts = grouper.group_experts_globally_from_dominant_experts(
             num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
@@ -135,6 +137,9 @@ def evaluate_mcsmoe(
 
     print(f"[MC-SMoE] Merging time: {time.time() - group_st:2f} seconds")
 
+    if num_average_groups < model.config.num_experts_per_tok:
+        model.config.num_experts_per_tok = num_average_groups
+
     print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
     if not os.path.exists(output_path):
         os.makedirs(output_path)
@@ -151,7 +156,7 @@ def evaluate_mcsmoe(
     else:
         for t in task:
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_batch_size, output_path=output_path, log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_batch_size, output_path=result_path, log=True
             )
 
 

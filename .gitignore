@@ -175,6 +175,7 @@ mc_env/
 # 2024/06/02
 log_*
 log*
+*_log
 *.pickle
 *.pkl
 *temp*.py

@@ -307,10 +307,10 @@ class ExpertsGrouperForMixtral(object):
                 self._group_state_dict[moe_name][i] = most_similar_group_label
                 group_member_count[most_similar_group_label] += 1
                 if group_member_count[self._group_state_dict[moe_name][i]] >= self.num_experts:
-                    if len(core_expert_indices) == 1:
-                        raise ValueError(
-                            f"[Merging]The number of groups at layer {layer_idx} is too small!"
-                        )
+                    # if len(core_expert_indices) == 1:
+                    #     raise ValueError(
+                    #         f"[Merging]The number of groups at layer {layer_idx} is too small!"
+                    #     )
                     # Kick out the filled group as well as its core, by pop the core from core_experts
                     core_index = torch.argmax(similarity_matrix[i, core_expert_indices])
                     core_expert_indices = torch.cat(
@@ -649,7 +649,7 @@ class ExpertsGrouperForMixtral(object):
             self._compute_layer_similarities_by_expert_outputs(model, dataloader, layer_idx)
         else:
             raise NotImplementedError
-      
+
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by weight..."):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
@@ -1818,7 +1818,7 @@ def _merge_moe_experts_within_and_across_models(
         print(f"\nGroup {label}: {expert_indices}")
         print("core_expert_indices: ", core_expert_indices)
         core_expert_index = [i for i, idx in enumerate(expert_indices) if idx in core_expert_indices]
-
+        zipit_st = time.time()
         if dominant_alone:
             group_core_expert_indices = torch.stack([
                 idx for idx in expert_indices if idx in core_expert_indices
@@ -1926,6 +1926,7 @@ def _merge_moe_experts_within_and_across_models(
             moe.experts[expert_idx] = moe.experts[expert_indices[0]]
             # moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
             # moe.experts[expert_idx.item()] = None
+        print(f"Merging takes {time.time() - zipit_st:.2f}s")
     # print(moe.expert_dict)
     # moe.forward = MethodType(merged_moe_forward, moe)
     return moe

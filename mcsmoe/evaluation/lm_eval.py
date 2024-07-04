@@ -65,7 +65,6 @@ def evaluate_fewshot(
         batch_size=eval_batch_size,
     )
 
-   
     # if output_path:
     #     path = Path(output_path)
     #     # check if file or 'dir/results.json' exists
@@ -100,7 +99,7 @@ def evaluate_fewshot(
             print(make_table(results, "groups"))
     
     if output_path:
-        f = open(os.path.join(output_path, "results.log"), "a")
+        f = open(output_path, "a")
         print(make_table(results), file=f)
         if "groups" in results:
             print(make_table(results, "groups"), file=f)

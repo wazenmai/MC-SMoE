@@ -29,6 +29,7 @@ def evaluate_mcsmoe(
         eval_batch_size: Optional[int] = 32,
         partition: Optional[int] = 1,
         output_path: Optional[str] = None,
+        result_path: Optional[str] = None,
 ):
     print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
 
@@ -49,6 +50,7 @@ def evaluate_mcsmoe(
     #     batch_size=1,
     #     subset_ratio=0.1,
     # )
+
     if merge != "no":
         dataloader_for_merging = get_calib_dataloder(
             dataset="c4",
@@ -122,17 +124,15 @@ def evaluate_mcsmoe(
         )
     elif isinstance(task, str):
         evaluate_fewshot(
-            model, tokenizer=tokenizer, task=task, num_fewshot=num_fewshot, output_path=output_path, log=True
+            model, tokenizer=tokenizer, task=task, num_fewshot=num_fewshot, output_path=output_path, eval_batch_size=eval_batch_size, log=True
         )
     else:
-        tasks = ["winogrande", "arc_challenge", "arc_easy", "boolq", "hellaswag", "mmlu", "openbookqa", "rte"]
-        eval_batch_sizes = [32, 32, 32, 16, 32, 16, 32, 32]
-        for t in task:
+        tasks = ["winogrande" , "arc_challenge", "arc_easy", "boolq", "hellaswag", "mmlu", "openbookqa", "rte"]
+        eval_size = [32, 32, 32, 16, 32, 12, 32, 32]
+        for i, t in enumerate(task):
             evaluate_fewshot(
-                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, output_path=output_path+f"_{t}", eval_batch_size=eval_batch_size, log=True
+                model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_size[i], output_path=result_path, log=True
             )
-            gc.collect()
-            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
