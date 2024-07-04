@@ -39,7 +39,8 @@ def evaluate_mcsmoe(
         "Qwen/Qwen1.5-MoE-A2.7B-Chat",
         torch_dtype=torch.float16, device_map="auto"
     )
-    model.load_state_dict(torch.load(model_name))
+    if model_name != "Qwen/Qwen1.5-MoE-A2.7B-Chat":
+        model.load_state_dict(torch.load(model_name))
     model.eval()
 
     # dataloader_for_merging = get_minipile_dataloder(
@@ -58,7 +59,8 @@ def evaluate_mcsmoe(
             num_workers=4,
         )
 
-        # MC-SMoE!
+    # MC-SMoE!
+    if merge != "no":
         print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
         grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
         grouper.compute_all_similarities(model, dataloader_for_merging)
