@@ -35,6 +35,7 @@ class ExpertsGrouperForMixtral(object):
             start_layer: int = 0,
             similarity_fn: str = "cosine",
             similarity_base: str = "router-logits",
+            group_limit: int = 4,
     ):
         if similarity_fn not in SIMILARITY_MAPPING_FUNCTION:
             raise ValueError(
@@ -49,6 +50,8 @@ class ExpertsGrouperForMixtral(object):
         self.d_ff = config.intermediate_size
         self.topk = config.num_experts_per_tok
         self.sparse_layer_indices = list(range(start_layer, config.num_hidden_layers))
+        self.group_limit = group_limit
+
         self.similarity_fn = SIMILARITY_MAPPING_FUNCTION[similarity_fn]
         self.similarity_base = similarity_base
         self._group_state_dict = None
@@ -125,8 +128,12 @@ class ExpertsGrouperForMixtral(object):
                 usage_frequency_dict[ffn_name] = torch.ones_like(usage_frequency_dict[ffn_name])
 
             # 2. Each layer must have at least one group, set the most used expert in a layer to frequency 1.
-            max_usage_index = torch.argmax(usage_frequency_dict[ffn_name])
-            usage_frequency_dict[ffn_name][max_usage_index] = 1.0
+            # print("usage_frequency_dict: ", usage_frequency_dict[ffn_name].shape)
+            k = (self.num_experts // self.group_limit) + 1 if (self.num_experts % self.group_limit != 0) else (self.num_experts // self.group_limit)
+            value, index = torch.topk(usage_frequency_dict[ffn_name], k)
+            usage_frequency_dict[ffn_name][index] = 1.0           
+            # max_usage_index = torch.argmax(usage_frequency_dict[ffn_name])
+            # usage_frequency_dict[ffn_name][max_usage_index] = 1.0
 
             # 3. Collect all usage frequency.
             all_usage_frequency.append(usage_frequency_dict[ffn_name])
@@ -198,23 +205,47 @@ class ExpertsGrouperForMixtral(object):
         ):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
             num_groups = num_groups_per_layer[ffn_name]
+            group_member_count = torch.zeros(num_groups)
+
             indices_sorted_by_usage = torch.argsort(self._usage_frequency_state_dict[ffn_name], descending=True)
             # 1 Assign top-K most-used experts with label 0 to K-1 respectively
             core_expert_indices = indices_sorted_by_usage[:num_groups]
             dom_experts[ffn_name] = core_expert_indices.tolist()
             for i in range(num_groups):
                 self._group_state_dict[ffn_name][indices_sorted_by_usage[i]] = i
-
+                group_member_count[i] += 1
             # 2 Assign left unassigned experts to the cluster with the most similar core
             similarity_matrix = self.get_similarity_matrix(ffn_name)
             print(similarity_matrix)
-            for i in range(num_groups, self.num_experts):
+            for i in range(0, self.num_experts):
+                if i in core_expert_indices:
+                    continue
                 # Find the most similar core
                 most_similar_core = core_expert_indices[
                     torch.argmax(similarity_matrix[i, core_expert_indices])
                 ]
                 most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
                 self._group_state_dict[ffn_name][i] = most_similar_group_label
+                group_member_count[most_similar_group_label] += 1
+                print(f"--expert {i} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
+                while group_member_count[self._group_state_dict[ffn_name][i]] > self.group_limit:
+                    if len(core_expert_indices) == 1 and self.group_limit < self.num_experts:
+                        raise ValueError(
+                            f"[Merging]The number of groups at layer {layer_idx} is too small!"
+                        )
+                    print(f"----meet group limit {self.group_limit}, turn core experts of expert {i}'s group from {most_similar_core} to ", end='')
+                    group_member_count[self._group_state_dict[ffn_name][i]] -= 1
+
+                    # reset similarity of the most similar core to -1
+                    similarity_matrix[:, most_similar_core] = -1
+                    # reassign group label
+                    most_similar_core = core_expert_indices[
+                        torch.argmax(similarity_matrix[i, core_expert_indices])
+                    ]
+                    most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
+                    self._group_state_dict[ffn_name][i] = most_similar_group_label
+                    group_member_count[most_similar_group_label] += 1
+                    print(most_similar_core.item())
 
         return dom_experts
     
@@ -239,7 +270,6 @@ class ExpertsGrouperForMixtral(object):
                 most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
                 self._group_state_dict[moe_name][i] = most_similar_group_label
         return core_experts
-    
 
 
     #TODO: group_experts_by_knowledge_layerwise
@@ -550,6 +580,8 @@ class ExpertsGrouperForMixtral(object):
             dataloader: DataLoader,
     ):
         model.eval()
+        for p in model.parameters():
+            p.requires_grad_(False)
         config = model.config
         for batch in tqdm(dataloader, desc=f"[MC-SMoE] Evaluating routing distribution"):
             batch = {k: v.cuda() for k, v in batch.items()}
@@ -576,10 +608,6 @@ class ExpertsGrouperForMixtral(object):
             model: MixtralForCausalLM,
             dataloader: DataLoader = None
     ):
-        if os.path.exists("similarity.pkl"):
-            with open("similarity.pkl", "rb") as f:
-                self._similarity_state_dict = pickle.load(f)
-            return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -597,8 +625,6 @@ class ExpertsGrouperForMixtral(object):
             self._compute_all_similarities_by_expert_inputs_abs(model, dataloader)
         else:
             raise NotImplementedError
-        with open("similarity.pkl", "wb") as f:
-            pickle.dump(self._similarity_state_dict, f)
     
     def compute_similarities_layerwise(
         self,
@@ -606,10 +632,6 @@ class ExpertsGrouperForMixtral(object):
         layer_idx: int,
         dataloader: DataLoader = None
     ):
-        # if os.path.exists("similarity.pkl"):
-        #     with open("similarity.pkl", "rb") as f:
-        #         self._similarity_state_dict = pickle.load(f)
-        #     return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -625,10 +647,7 @@ class ExpertsGrouperForMixtral(object):
             self._compute_layer_similarities_by_expert_outputs(model, dataloader, layer_idx)
         else:
             raise NotImplementedError
-        
-        # with open("similarity.pkl", "wb") as f:
-        #     pickle.dump(self._similarity_state_dict, f)
-
+      
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE]  Computing similarities by weight..."):
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
@@ -995,28 +1014,41 @@ class ExpertsGrouperForMixtral(object):
             group_member_count = torch.zeros(num_groups)
             indices_sorted_by_kl = torch.argsort(moe_scores, descending=True).cpu()
             core_expert_indices = indices_sorted_by_kl[:num_groups]
+            print("core_expert_indices: ", core_expert_indices)
             core_experts[moe_name] = core_expert_indices.tolist()
             for i in range(num_groups):
                 self._group_state_dict[moe_name][core_expert_indices[i]] = i
                 group_member_count[i] += 1
             similarity_matrix = self.get_similarity_matrix(moe_name)
-            for i in range(num_groups, self.num_experts): # assign group label to left experts
+            for i in range(0, self.num_experts): # assign group label to left experts
+                if i in core_expert_indices:
+                    continue
                 most_similar_core = core_expert_indices[
                     torch.argmax(similarity_matrix[i, core_expert_indices])
                 ]
                 most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
                 self._group_state_dict[moe_name][i] = most_similar_group_label
                 group_member_count[most_similar_group_label] += 1
-                if group_member_count[self._group_state_dict[moe_name][i]] >= self.num_experts:
-                    if len(core_expert_indices) == 1:
+                print(f"--expert {i} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
+                while group_member_count[self._group_state_dict[moe_name][i]] > self.group_limit:
+                    if len(core_expert_indices) == 1 and self.group_limit < self.num_experts:
                         raise ValueError(
-                            f"[Merging]The number of groups at layer {layer_idx} is too small!"
+                            f"[Merging]The number of groups at Encoder layer {layer_idx} is too small!"
                         )
-                    # Kick out the filled group as well as its core, by pop the core from core_experts
-                    core_index = torch.argmax(similarity_matrix[i, core_expert_indices])
-                    core_expert_indices = torch.cat(
-                        [core_expert_indices[:core_index], core_expert_indices[core_index + 1:]]
-                    )
+                    print(f"----meet group limit {self.group_limit}, turn core experts of expert {i}'s group from {most_similar_core} to ", end='')
+                    group_member_count[self._group_state_dict[moe_name][i]] -= 1
+
+                    # set the similarity btw. other expert and core expert of exceed group as -1
+                    similarity_matrix[:, most_similar_core] = -1
+                    
+                    # Reassign group label
+                    most_similar_core = core_expert_indices[
+                        torch.argmax(similarity_matrix[i, core_expert_indices])
+                    ]
+                    print(most_similar_core.item())
+                    most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
+                    self._group_state_dict[moe_name][i] = most_similar_group_label
+                    group_member_count[most_similar_group_label] += 1
             print(f"core expert: {core_experts[moe_name]}")
             
             # STEP: 4. Zipit Merge
@@ -1783,13 +1815,14 @@ def _merge_moe_experts_within_and_across_models(
         moe_scores: Optional[torch.Tensor] = None,
 ) -> MixtralSparseMoeBlock:
 
-    moe.expert_dict = {} # org expert idx: new expert idx
+    # moe.expert_dict = {} # org expert idx: new expert idx
     input_weight = None
 
     # p = 0
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
         print(f"\nGroup {label}: {expert_indices}")
+        print("core_expert_indices: ", core_expert_indices)
         core_expert_index = [i for i, idx in enumerate(expert_indices) if idx in core_expert_indices]
 
         if dominant_alone:
@@ -1874,7 +1907,7 @@ def _merge_moe_experts_within_and_across_models(
                         mini_batch_size=5000,
                         average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
                         input_weight=input_weight,
-                        dominant_index=core_expert_indices[0],
+                        dominant_index=core_expert_index[0],
                     )
                 else: # zipit-normal, activation-with-router-logits, input-weight
                     merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
@@ -1885,17 +1918,17 @@ def _merge_moe_experts_within_and_across_models(
                         input_weight=input_weight,
                     )
                 
-        moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
-        moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
-        moe.experts[expert_indices[0].item()].w3.weight.copy_(merged_expert.w3.weight)
+        # moe.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
+        # moe.experts[expert_indices[0].item()].w2.weight.copy_(merged_expert.w2.weight)
+        # moe.experts[expert_indices[0].item()].w3.weight.copy_(merged_expert.w3.weight)
         
-        moe.expert_dict[expert_indices[0].item()] = expert_indices[0].item()
+        # moe.expert_dict[expert_indices[0].item()] = expert_indices[0].item()
 
         for expert_idx in expert_indices[1:]:
             # Binding merged experts to the first of them
-            # moe.experts[expert_idx] = moe.experts[expert_indices[0]]
-            moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
-            moe.experts[expert_idx.item()] = None
+            moe.experts[expert_idx] = moe.experts[expert_indices[0]]
+            # moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
+            # moe.experts[expert_idx.item()] = None
         
         # try:
         #     torch.cuda.memory._dump_snapshot(f"activation_{p}.pickle")
@@ -1906,9 +1939,9 @@ def _merge_moe_experts_within_and_across_models(
     # Stop recording memory snapshot history.
     # torch.cuda.memory._record_memory_history(enabled=None)
     
-    print(moe.expert_dict)
+    # print(moe.expert_dict)
 
-    moe.forward = MethodType(merged_moe_forward, moe)
+    # moe.forward = MethodType(merged_moe_forward, moe)
     return moe
 
 

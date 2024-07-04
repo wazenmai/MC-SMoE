@@ -1,7 +1,11 @@
+# -*- modified by wazenmai -*-
+# @Time: 2024/07/03
+
 # -*- coding: utf-8 -*-
 # @Author: pingzhili
 # @Time: 2024/2/18
 
+import os
 import json
 import numpy as np
 from pathlib import Path
@@ -61,9 +65,7 @@ def evaluate_fewshot(
         batch_size=eval_batch_size,
     )
 
-    if output_path:
-        f = open(os.join(output_path, "results.log"), "w")
-
+   
     # if output_path:
     #     path = Path(output_path)
     #     # check if file or 'dir/results.json' exists
@@ -93,12 +95,17 @@ def evaluate_fewshot(
 
     if log:
         print(make_table(results))
-        print(make_table(results), file=f)
+        
         if "groups" in results:
             print(make_table(results, "groups"))
-            print(make_table(results, "groups"), file=f)
     
     if output_path:
-        f.close()
+        f = open(os.path.join(output_path, "results.log"), "a")
+        print(make_table(results), file=f)
+        if "groups" in results:
+            print(make_table(results, "groups"), file=f)
+        f.close() 
+        
+
 
     return results
