@@ -238,6 +238,9 @@ class ExpertsGrouperForMixtral(object):
                     print(f"----meet group limit {self.group_limit}, turn core experts of expert {i}'s group from {most_similar_core} to ", end='')
                     group_member_count[self._group_state_dict[ffn_name][i]] -= 1
 
+                    #TODO: when a group is at its limit, kick out the expert that has smallest similarity with the core of full group
+                    
+
                     # reset similarity of the most similar core to -1
                     similarity_matrix[:, most_similar_core] = -1
                     # reassign group label

@@ -57,48 +57,27 @@ def evaluate_mcsmoe(
     #     subset_ratio=0.1,
     # )
 
-    print("[MC-SMoE] Number of parameters before merging:", model.num_parameters())
+    if merge != "no":
+        print("[MC-SMoE] Number of parameters before merging:", model.num_parameters())
 
-    dataloader_for_merging = get_calib_dataloder(
-        dataset="c4",
-        tokenizer=tokenizer,
-        max_block_size=2048,
-        n_blocks_for_stat=n_sentences, # 32, 128
-        batch_size=train_batch_size,
-        num_workers=4,
-    )
-
-    # MC-SMoE!
-    print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
-    group_st = time.time()
-
-    grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base, start_layer=start_layer, group_limit=group_limit, data_limit=data_limit)
-    grouper.compute_all_similarities(model, dataloader_for_merging)
-    
-    if dominant == "random":
-        grouper.group_experts_randomly(num_groups=num_average_groups)
-        model = merge_by_groups_within_and_across_models(
-            mixtral_model=model,
-            grouper=grouper,
-            dataloader=dataloader_for_merging,
-            mode=mode,
-            partition=partition,
-            dominant_alone=False,
-            usage_weighted=False
+        dataloader_for_merging = get_calib_dataloder(
+            dataset="c4",
+            tokenizer=tokenizer,
+            max_block_size=2048,
+            n_blocks_for_stat=n_sentences, # 32, 128
+            batch_size=train_batch_size,
+            num_workers=4,
         )
-        dom_experts = None
-    elif dominant == "frequency":
-        grouper.compute_all_usages(model, dataloader_for_merging)
-        print(grouper.usage_frequency_state_dict())
-        torch.cuda.empty_cache()
-        dom_experts = grouper.group_experts_globally_from_dominant_experts(
-            num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
-        )
-        if merge == "freq":
-            model = merge_by_groups_with_usage_weighted(
-                model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
-            )
-        else:
+
+        # MC-SMoE!
+        print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
+        group_st = time.time()
+
+        grouper = ExpertsGrouperForMixtral(config=model.config, similarity_base=similarity_base, start_layer=start_layer, group_limit=group_limit, data_limit=data_limit)
+        grouper.compute_all_similarities(model, dataloader_for_merging)
+        
+        if dominant == "random":
+            grouper.group_experts_randomly(num_groups=num_average_groups)
             model = merge_by_groups_within_and_across_models(
                 mixtral_model=model,
                 grouper=grouper,
@@ -106,44 +85,70 @@ def evaluate_mcsmoe(
                 mode=mode,
                 partition=partition,
                 dominant_alone=False,
-                core_experts=dom_experts,
                 usage_weighted=False
             )
-    elif dominant == "knowledge":
-        model = grouper.all_in_one_knowledge_dominant(
-            model=model, 
-            dataloader=dataloader_for_merging, 
-            mode=mode,
-            num_groups=num_average_groups,
-            dominant_alone=False,
-            usage_weighted=False,
-        )
-        dom_experts = grouper.core_experts
-    else:
-        raise ValueError(
-            f"Accepted dominant methods are `random`, `frequency` and `knowledge`, but you input {dominant}"
-        )
-
-    # dom_experts = grouper.core_experts
-
-    print(f"[MC-SMoE] ========= Grouping results ========= ")
-    for name, state in grouper.group_state_dict().items():
-        if dom_experts is None:
-            print(f"Group {name}: {state.tolist()}")
+            dom_experts = None
+        elif dominant == "frequency":
+            grouper.compute_all_usages(model, dataloader_for_merging)
+            for k in grouper._usage_frequency_state_dict:
+                for num in grouper._usage_frequency_state_dict[k]:
+                    print(round(num.item(), 4), end=',')
+                print()
+            return
+            torch.cuda.empty_cache()
+            dom_experts = grouper.group_experts_globally_from_dominant_experts(
+                num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
+            )
+            if merge == "freq":
+                model = merge_by_groups_with_usage_weighted(
+                    model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+                )
+            else:
+                model = merge_by_groups_within_and_across_models(
+                    mixtral_model=model,
+                    grouper=grouper,
+                    dataloader=dataloader_for_merging,
+                    mode=mode,
+                    partition=partition,
+                    dominant_alone=False,
+                    core_experts=dom_experts,
+                    usage_weighted=False
+                )
+        elif dominant == "knowledge":
+            model = grouper.all_in_one_knowledge_dominant(
+                model=model, 
+                dataloader=dataloader_for_merging, 
+                mode=mode,
+                num_groups=num_average_groups,
+                dominant_alone=False,
+                usage_weighted=False,
+            )
+            dom_experts = grouper.core_experts
         else:
-            print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
-        
-    del grouper
+            raise ValueError(
+                f"Accepted dominant methods are `random`, `frequency` and `knowledge`, but you input {dominant}"
+            )
 
-    print(f"[MC-SMoE] Merging time: {time.time() - group_st:2f} seconds")
+        # dom_experts = grouper.core_experts
 
-    if num_average_groups < model.config.num_experts_per_tok:
-        model.config.num_experts_per_tok = num_average_groups
+        print(f"[MC-SMoE] ========= Grouping results ========= ")
+        for name, state in grouper.group_state_dict().items():
+            if dom_experts is None:
+                print(f"Group {name}: {state.tolist()}")
+            else:
+                print(f"Group {name}: {state.tolist()} (DOMs are {dom_experts[name]})")
+            
+        del grouper
 
-    print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    torch.save(model.state_dict(), output_path+"/model.pth")
+        print(f"[MC-SMoE] Merging time: {time.time() - group_st:2f} seconds")
+
+        if num_average_groups < model.config.num_experts_per_tok:
+            model.config.num_experts_per_tok = num_average_groups
+
+        print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+        torch.save(model.state_dict(), output_path+"/model.pth")
 
     if eval_ppl:
         evaluate_minipile_perplexity(
