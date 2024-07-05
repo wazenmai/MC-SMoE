@@ -94,7 +94,7 @@ def evaluate_fewshot(
             print(make_table(results, "groups"))
     
     if output_path:
-        f = open(output_path, 'w')
+        f = open(output_path, 'a')
         print(make_table(results), file=f)
         if "groups" in results:
             print(make_table(results, "groups"), file=f)
