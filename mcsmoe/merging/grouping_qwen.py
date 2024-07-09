@@ -38,11 +38,11 @@ class ExpertsGrouperForQwen2MoE(object):
     ):
         if similarity_fn not in SIMILARITY_MAPPING_FUNCTION:
             raise ValueError(
-                f"[MC-SMoE]similarity_fn should be one of {SIMILARITY_MAPPING_FUNCTION.keys()}, got {similarity_fn} instead."
+                f"[TAMP]similarity_fn should be one of {SIMILARITY_MAPPING_FUNCTION.keys()}, got {similarity_fn} instead."
             )
         if similarity_base not in LEGAL_SIMILARITY_BASES:
             raise ValueError(
-                f"[MC-SMoE] similarity_base should be one of {LEGAL_SIMILARITY_BASES}, got {similarity_base} instead.")
+                f"[TAMP] similarity_base should be one of {LEGAL_SIMILARITY_BASES}, got {similarity_base} instead.")
 
         self.num_experts = config.num_experts
         self.d_model = config.hidden_size
@@ -63,7 +63,7 @@ class ExpertsGrouperForQwen2MoE(object):
     def reset_all(self):
         if self.similarity_base == "mse":
             self.similarity_fn = SIMILARITY_MAPPING_FUNCTION["mse"]
-            print("[MC-SMoE]Set similarity_fn to mse for mse similarity_base.")
+            print("[TAMP]Set similarity_fn to mse for mse similarity_base.")
         self._group_state_dict = dict()
         self._similarity_state_dict = dict()
         self._usage_frequency_state_dict = dict()
@@ -111,6 +111,7 @@ class ExpertsGrouperForQwen2MoE(object):
         total_num_groups = num_average_groups * num_grouping_layers + self.num_experts * (
                 len(self.sparse_layer_indices) - num_grouping_layers
         )
+        print("total_num_groups: ", total_num_groups)
         all_usage_frequency = []
         usage_frequency_dict = deepcopy(self._usage_frequency_state_dict)
         for i, layer_idx in enumerate(self.sparse_layer_indices):
@@ -136,10 +137,10 @@ class ExpertsGrouperForQwen2MoE(object):
         if num_average_groups == self.num_experts:
             total_num_groups = total_num_groups - 1
         frequency_threshold = sorted_usage_frequency[total_num_groups]
-        print(f"[MC-SMoE] Frequency threshold: {frequency_threshold}")
+        print(f"[TAMP] Frequency threshold: {frequency_threshold}")
 
         if frequency_threshold == 1.0:
-            raise ValueError("[MC-SMoE] The number of groups is too large, please reduce the number of groups.")
+            raise ValueError("[TAMP] The number of groups is too large, please reduce the number of groups.")
 
         for i, layer_idx in enumerate(self.sparse_layer_indices):
             ffn_name = f"model.layers.{layer_idx}.mlp"
@@ -185,34 +186,69 @@ class ExpertsGrouperForQwen2MoE(object):
         num_groups_per_layer = self._assign_num_groups_per_layer(
             num_average_groups, merging_layers
         )
-        print(f"[MC-SMoE] Number of groups per layer: {num_groups_per_layer}")
+        print(f"[TAMP] Number of groups per layer: {num_groups_per_layer}")
 
         # 2. Group experts into clusters for each layer
         dom_experts = dict()
         for layer_idx in tqdm(
                 self.sparse_layer_indices,
-                desc=f"[MC-SMoE] Globally routing-guided grouping experts into average {num_average_groups} clusters"
+                desc=f"[TAMP] Globally routing-guided grouping experts into average {num_average_groups} clusters"
         ):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             num_groups = num_groups_per_layer[ffn_name]
+            group_member_count = torch.zeros(num_groups)
+
             indices_sorted_by_usage = torch.argsort(self._usage_frequency_state_dict[ffn_name], descending=True)
 
             # 1 Assign top-K most-used experts with label 0 to K-1 respectively
+            group_dict = {} 
             core_expert_indices = indices_sorted_by_usage[:num_groups]
             dom_experts[ffn_name] = core_expert_indices.tolist()
             for i in range(num_groups):
                 self._group_state_dict[ffn_name][indices_sorted_by_usage[i]] = i
-
+                group_member_count[i] += 1
+                group_dict[i] = [core_expert_indices[i].item()]
             # 2 Assign left unassigned experts to the cluster with the most similar core
             similarity_matrix = self.get_similarity_matrix(ffn_name)
-            for i in range(num_groups, self.num_experts):
+            print(similarity_matrix)
+            print(core_expert_indices)
+            for i in range(0, self.num_experts):
+                if i in core_expert_indices:
+                    continue
                 # Find the most similar core
                 most_similar_core = core_expert_indices[
                     torch.argmax(similarity_matrix[i, core_expert_indices])
                 ]
                 most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
                 self._group_state_dict[ffn_name][i] = most_similar_group_label
-
+                group_member_count[most_similar_group_label] += 1
+                group_dict[most_similar_group_label.item()].append(i)
+                print(f"--expert {i} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
+                if group_member_count[self._group_state_dict[ffn_name][i]] > self.group_limit:
+                    if len(core_expert_indices) == 1 and self.group_limit < self.num_experts:
+                        raise ValueError(
+                            f"[Merging]The number of groups at Encoder layer {layer_idx} is too small!"
+                        )
+                    
+                    while group_member_count[most_similar_group_label] > self.group_limit:
+                        print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
+                        # Find the most unsimilar expert in the exceed group
+                        sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
+                    
+                        group_member_count[self._group_state_dict[ffn_name][i]] -= 1
+                        group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
+                        similarity_matrix[unsimilar_idx, most_similar_core] = -1
+                        similarity_matrix[most_similar_core, unsimilar_idx] = -1
+                        print(f"----kick out {unsimilar_idx} from group ")
+                        # Reassign group label
+                        most_similar_core = core_expert_indices[
+                            torch.argmax(similarity_matrix[unsimilar_idx, core_expert_indices])
+                        ]
+                        most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
+                        self._group_state_dict[ffn_name][unsimilar_idx] = most_similar_group_label
+                        group_member_count[most_similar_group_label] += 1
+                        print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
         return dom_experts
 
     def compute_all_usages(
@@ -222,7 +258,7 @@ class ExpertsGrouperForQwen2MoE(object):
     ):
         model.eval()
         config = model.config
-        for batch in tqdm(dataloader, desc=f"[MC-SMoE] Evaluating routing distribution"):
+        for batch in tqdm(dataloader, desc=f"[TAMP] Evaluating routing distribution"):
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
                 # We don't need to compute loss here, so remove the labels
@@ -255,7 +291,7 @@ class ExpertsGrouperForQwen2MoE(object):
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
-                "[MC-SMoE] `dataloader` should be provided when similarity_base is not 'weight' or 'router-weight'")
+                "[TAMP] `dataloader` should be provided when similarity_base is not 'weight' or 'router-weight'")
         model = model.eval()
         if self.similarity_base == "weight":
             self._compute_all_similarities_by_weight(model.state_dict())
@@ -272,7 +308,7 @@ class ExpertsGrouperForQwen2MoE(object):
         #     pickle.dump(self._similarity_state_dict, f)
 
     def _compute_all_similarities_by_weight(self, state_dict: Dict[str, torch.Tensor]):
-        for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE]  Computing similarities by weight..."):
+        for layer_idx in tqdm(self.sparse_layer_indices, desc="[TAMP]  Computing similarities by weight..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             for i in range(self.num_experts):
                 for j in range(i + 1, self.num_experts):
@@ -294,7 +330,7 @@ class ExpertsGrouperForQwen2MoE(object):
     def _compute_all_similarities_by_router_weight(
             self, state_dict: Dict[str, torch.Tensor]
     ):
-        for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by router rows..."):
+        for layer_idx in tqdm(self.sparse_layer_indices, desc="[TAMP] Computing similarities by router rows..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             for i in range(self.num_experts):
                 for j in range(i + 1, self.num_experts):
@@ -308,7 +344,7 @@ class ExpertsGrouperForQwen2MoE(object):
     ):
         model.eval()
         all_router_logits = []
-        for batch in tqdm(dataloader, desc=f"[MC-SMoE] Running inference to get routing logits"):
+        for batch in tqdm(dataloader, desc=f"[TAMP] Running inference to get routing logits"):
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
                 # We don't need to compute loss here, so remove the labels
@@ -320,7 +356,7 @@ class ExpertsGrouperForQwen2MoE(object):
             all_router_logits.append(batch_router_logits)
 
         all_router_logits = torch.cat(all_router_logits, dim=1)  # (num_hidden_layers, *, num_experts)
-        for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by router logits..."):
+        for layer_idx in tqdm(self.sparse_layer_indices, desc="[TAMP] Computing similarities by router logits..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             layer_router_logits = all_router_logits[layer_idx].reshape(-1, self.num_experts)
             with torch.no_grad():
@@ -353,7 +389,7 @@ class ExpertsGrouperForQwen2MoE(object):
                 _get_activation_hook(ffn_name))
             )
 
-        for batch in tqdm(dataloader, desc=f"[MC-SMoE] Running inference to collect moe inputs"):
+        for batch in tqdm(dataloader, desc=f"[TAMP] Running inference to collect moe inputs"):
             batch = {k: v.cuda() for k, v in batch.items()}
             if "labels" in batch:
                 # We don't need to compute loss here, so remove the labels
@@ -366,7 +402,7 @@ class ExpertsGrouperForQwen2MoE(object):
             handle.remove()
         torch.cuda.empty_cache()
 
-        for layer_idx in tqdm(self.sparse_layer_indices, desc="[MC-SMoE] Computing similarities by expert outputs..."):
+        for layer_idx in tqdm(self.sparse_layer_indices, desc="[TAMP] Computing similarities by expert outputs..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
             layer_input = torch.cat(forwarded_hidden_states[ffn_name]).cuda()
             expert_outputs = [] # (E, #T, D) -> average -> (E, D)
@@ -386,7 +422,7 @@ class ExpertsGrouperForQwen2MoE(object):
             self,
             model: Qwen2MoeForCausalLM,
             dataloader: DataLoader,
-            merge: Optional[str] = "zipit"
+            merge: Optional[str] = "zipit",
             mode: Optional[str] = "normal",
             num_groups: Optional[int] = 30,
             dominant_alone: Optional[bool] = False,
@@ -463,7 +499,7 @@ class ExpertsGrouperForQwen2MoE(object):
                 outputs = model(**batch, output_router_logits=True)
                 router_logits = outputs.router_logits
 
-                if layer_idx == 0:
+                if layer_idx == self.sparse_layer_indices[0]:
                     pred = F.softmax(outputs.logits / T, dim=1).detach()
                     kd_labels.append(pred.cpu())
                 else:
@@ -494,9 +530,7 @@ class ExpertsGrouperForQwen2MoE(object):
                     # get feature
                     # token_id = (expert_index == e).nonzero()
                     # number_of_tokens = token_id.shape[0]
-                    # print(f"_inputs: {len(_inputs[e])}, {_inputs[e][-1].shape}, number_of_tokens: {number_of_tokens}")
                     # _features = _inputs[e][-1][:number_of_tokens].to(torch.float32).to(_device)
-                    # print(f"_inputs: {len(_inputs[e])}, {_inputs[e][-1].shape}")
                     _features = _inputs[e][-1].to(torch.float32).to(_device)
 
                     # get weigth and calculate representational knowledge
@@ -522,7 +556,7 @@ class ExpertsGrouperForQwen2MoE(object):
             moe_scores = origin_moe_scores.mean(dim=-1) # (E,)
             print(f"moe_scores: {moe_scores.shape} {moe_scores}")
 
-            if layer_idx == 0:
+            if layer_idx == self.sparse_layer_indices[0]:
                 kd_labels = torch.cat(kd_labels, dim=0)
                 print(f"kd_labels: {kd_labels.shape} {kd_labels}")
             
@@ -541,7 +575,7 @@ class ExpertsGrouperForQwen2MoE(object):
             for i in range(num_groups):
                 self._group_state_dict[moe_name][core_expert_indices[i]] = i
                 group_member_count[i] += 1
-                group_dict[i] = [core_expert_indices[i]]
+                group_dict[i] = [core_expert_indices[i].item()]
             similarity_matrix = self.get_similarity_matrix(moe_name)
             for i in range(0, self.num_experts): # assign group label to left experts
                 if i in core_expert_indices:
@@ -561,13 +595,14 @@ class ExpertsGrouperForQwen2MoE(object):
                             f"[Merging]The number of groups at Encoder layer {layer_idx} is too small!"
                         )
                     
-                    while group_membert_count[most_similar_group_label] > self.group_limit:
+                    while group_member_count[most_similar_group_label] > self.group_limit:
                         print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
                         # Find the most unsimilar expert in the exceed group
-                        sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label]]
-                        unsimilar_idx = torch.argmin(sim)
-                    
+                        sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
+                        
                         group_member_count[self._group_state_dict[moe_name][i]] -= 1
+                        group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
                         print(f"----kick out {unsimilar_idx} from group ")
@@ -580,7 +615,6 @@ class ExpertsGrouperForQwen2MoE(object):
                         group_member_count[most_similar_group_label] += 1
                         group_dict[most_similar_group_label.item()].append(unsimilar_idx)
                         print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
-            print(f"core expert: {core_experts[moe_name]}")
 
             # STEP: 4. Zipit Merge
             group_labels = self._group_state_dict[moe_name]
@@ -1023,6 +1057,36 @@ def _merge_qwen_moe_experts_with_dominant_same_rule(
     return merged_ffn
 
 @torch.no_grad()
+def process_coef(num_ffn, d_ff, d_model, average_coefs=None, input_weight=None):
+    if input_weight is not None:
+        first_coef = []
+        second_coef = []
+        for w in input_weight:
+            coef_1 = [w] * d_ff
+            first_coef.extend(coef_1)
+            coef_2 = [w] * d_model
+            second_coef.extend(coef_2)
+    elif average_coefs is None:
+        first_coef = [1.0] * num_ffn * d_ff
+        second_coef = [1.0] * num_ffn * d_model
+    elif len(average_coefs) == num_ffn:
+        first_coef = [coef for coef in average_coefs for _ in range(d_ff)]
+        second_coef = [coef for coef in average_coefs for _ in range(d_model)]
+    else:
+        raise ValueError("The argument `avearge_coefs` should be either None or have the same length as `num_ffn`, or you need to provide `input_weight`.")
+    return first_coef, second_coef
+
+@torch.no_grad()
+def compute_correlation(act):
+    mean = act.mean(dim=0, keepdim=True)
+    std = act.std(dim=0, keepdim=True)
+    covar = torch.mm((act - mean).T, act - mean) / (act.shape[0] - 1)
+    corr_matrix = covar / (std.T * std + FP32_EPS)
+    del mean, std, covar
+    torch.cuda.empty_cache()
+    return corr_matrix
+
+@torch.no_grad()
 def compute_merging(temp_dim, target_dim, corr_matrix, coef, alpha, _device):
     permutation_matrix = torch.eye(temp_dim, temp_dim, dtype=torch.float, device=_device)
     while corr_matrix.shape[0] > target_dim:
@@ -1270,12 +1334,14 @@ def _merge_moe_experts_within_and_across_models(
         data_limit: Optional[int] = 50000,
 ) -> Qwen2MoeSparseMoeBlock:
 
+    _device = moe.experts[0].gate_proj.weight.device
+    _dtype = moe.experts[0].gate_proj.weight.dtype
+    
     # moe.expert_dict = {}
     input_weight = None
     if merge == "unmerge":
         moe = Qwen2MoEWrapper(moe)
     print("core_expert_indices: ", core_expert_indices)
-
 
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
@@ -1288,10 +1354,6 @@ def _merge_moe_experts_within_and_across_models(
             s = sum(input_weight)
             input_weight = [w / s for w in input_weight]
             print(f"Input weight: {input_weight}")
-            # input_weight /= sum(input_weight)
-
-        _device = moe.model.experts[0].gate_proj.weight.device
-        _dtype = moe.model.experts[0].gate_proj.weight.dtype
         # not dominant
         group_forwarded_hidden_states = torch.cat([
             forwarded_hidden_states[expert_idx] for expert_idx in expert_indices
@@ -1387,7 +1449,7 @@ def merge_by_groups_with_usage_weighted(
 
     for layer_idx in tqdm(
             grouper.sparse_layer_indices,
-            desc=f"[MC-SMoE] Merging experts with usage-frequency-weighted averaging..."
+            desc=f"[TAMP] Merging experts with usage-frequency-weighted averaging..."
     ):
         if merging_layers is not None and layer_idx not in merging_layers:
             continue
@@ -1452,7 +1514,7 @@ def merge_by_groups_within_and_across_models(
                     routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1, dtype=torch.float)
                     routing_weights, selected_experts = torch.topk(routing_weights, qwen_model.config.num_experts_per_tok, dim=-1)
                     router_indices[ffn_name].append(selected_experts)
-                    if mode == "activation-with-router-logits" or "mode" == "all":
+                    if mode == "activation-with-router-logits" or mode == "all":
                         router_weights[ffn_name].append(routing_weights)
                         
         for handle in handles:
@@ -1500,7 +1562,7 @@ def merge_by_groups_within_and_across_models(
                 data_limit=grouper.data_limit,
             )
             del layer_forwarded_hidden_states
-            hidden_satates_list.clear()
+            hidden_states_list.clear()
             print(f"------- Layer {layer_idx} took {time.time() - _st:.2f}s -------\n")
 
     print(grouper.sparse_layer_indices)

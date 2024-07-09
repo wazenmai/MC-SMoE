@@ -35,7 +35,7 @@ def evaluate_mcsmoe(
         data_limit: Optional[int] = 1000000,
         num_fewshot: Optional[int] = 0,
 ):
-    print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
+    print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + {merge} merge - {mode}, evaluate on {task}")
 
     eval_ppl = (task == "minipile")
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B-Chat")
@@ -74,16 +74,16 @@ def evaluate_mcsmoe(
             grouper.group_experts_randomly(num_groups=num_average_groups)
             # Freq-merge
             model = merge_by_groups_with_usage_weighted(
-                model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+                model, grouper=grouper, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
             )
         elif dominant == "frequency":
             grouper.compute_all_usages(model, dataloader_for_merging)
             dom_experts = grouper.group_experts_globally_from_dominant_experts(
-                num_average_groups=num_average_groups, merging_layers=list(range(0, model.config.num_hidden_layers))
+                num_average_groups=num_average_groups, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
             )
             if merge == "freq":
                 model = merge_by_groups_with_usage_weighted(
-                    model, grouper=grouper, merging_layers=list(range(0, model.config.num_hidden_layers))
+                    model, grouper=grouper, merging_layers=list(range(start_layer, model.config.num_hidden_layers))
                 )
             else:
                 model = merge_by_groups_within_and_across_models(
@@ -92,6 +92,7 @@ def evaluate_mcsmoe(
                     dataloader=dataloader_for_merging,
                     merge=merge,
                     mode=mode,
+                    core_experts=dom_experts,
                     dominant_alone=False,
                     usage_weighted=False
                 )
@@ -132,9 +133,9 @@ def evaluate_mcsmoe(
             model, tokenizer=tokenizer, task=task, num_fewshot=num_fewshot, output_path=output_path, eval_batch_size=eval_batch_size, log=True
         )
     else:
-        tasks = ["winogrande" , "arc_challenge", "arc_easy", "boolq", "hellaswag", "mmlu", "openbookqa", "rte"]
+        tasks = ["rte" , "arc_challenge", "arc_easy", "boolq", "hellaswag", "mmlu", "openbookqa", "winogrande"]
         eval_size = [32, 32, 32, 16, 32, 12, 32, 32]
-        for i, t in enumerate(task):
+        for i, t in enumerate(tasks):
             evaluate_fewshot(
                 model, tokenizer=tokenizer, task=t, num_fewshot=num_fewshot, eval_batch_size=eval_size[i], output_path=result_path, log=True
             )

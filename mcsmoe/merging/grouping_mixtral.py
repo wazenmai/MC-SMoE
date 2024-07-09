@@ -244,9 +244,10 @@ class ExpertsGrouperForMixtral(object):
                         print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
                         # Find the most unsimilar expert in the exceed group
                         sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
-                        unsimilar_idx = torch.argmin(sim)
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
                     
                         group_member_count[self._group_state_dict[ffn_name][i]] -= 1
+                        group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
                         print(f"----kick out {unsimilar_idx} from group ")
@@ -258,28 +259,6 @@ class ExpertsGrouperForMixtral(object):
                         self._group_state_dict[ffn_name][unsimilar_idx] = most_similar_group_label
                         group_member_count[most_similar_group_label] += 1
                         print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
-                # while group_member_count[self._group_state_dict[ffn_name][i]] > self.group_limit:
-                #     if len(core_expert_indices) == 1 and self.group_limit < self.num_experts:
-                #         raise ValueError(
-                #             f"[Merging]The number of groups at layer {layer_idx} is too small!"
-                #         )
-                #     print(f"----meet group limit {self.group_limit}, turn core experts of expert {i}'s group from {most_similar_core} to ", end='')
-                #     group_member_count[self._group_state_dict[ffn_name][i]] -= 1
-
-                #     #TODO: when a group is at its limit, kick out the expert that has smallest similarity with the core of full group
-                    
-
-                #     # reset similarity of the most similar core to -1
-                #     similarity_matrix[:, most_similar_core] = -1
-                #     # reassign group label
-                #     most_similar_core = core_expert_indices[
-                #         torch.argmax(similarity_matrix[i, core_expert_indices])
-                #     ]
-                #     most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
-                #     self._group_state_dict[ffn_name][i] = most_similar_group_label
-                #     group_member_count[most_similar_group_label] += 1
-                #     print(most_similar_core.item())
-
         return dom_experts
     
     
@@ -641,10 +620,10 @@ class ExpertsGrouperForMixtral(object):
             model: MixtralForCausalLM,
             dataloader: DataLoader = None
     ):
-        if os.path.exists("similarity.pkl"):
-            with open("similarity.pkl", "rb") as f:
-                self._similarity_state_dict = pickle.load(f)
-            return
+        # if os.path.exists("similarity.pkl"):
+            # with open("similarity.pkl", "rb") as f:
+                # self._similarity_state_dict = pickle.load(f)
+            # return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -663,9 +642,9 @@ class ExpertsGrouperForMixtral(object):
         else:
             raise NotImplementedError
         
-        if not os.path.exists("similarity.pkl"):
-            with open("similarity.pkl", "wb") as f:
-                pickle.dump(self._similarity_state_dict, f)
+        # if not os.path.exists("similarity.pkl"):
+            # with open("similarity.pkl", "wb") as f:
+                # pickle.dump(self._similarity_state_dict, f)
     
     def compute_similarities_layerwise(
         self,
@@ -1060,7 +1039,7 @@ class ExpertsGrouperForMixtral(object):
             for i in range(num_groups):
                 self._group_state_dict[moe_name][core_expert_indices[i]] = i
                 group_member_count[i] += 1
-                group_dict[i] = [core_expert_indices[i]]
+                group_dict[i] = [core_expert_indices[i].item()]
             similarity_matrix = self.get_similarity_matrix(moe_name)
             for i in range(0, self.num_experts): # assign group label to left experts
                 if i in core_expert_indices:
@@ -1084,7 +1063,8 @@ class ExpertsGrouperForMixtral(object):
                         print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
                         # Find the most unsimilar expert in the exceed group
                         sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label]]
-                        unsimilar_idx = torch.argmin(sim)
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
+                        group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                     
                         group_member_count[self._group_state_dict[moe_name][i]] -= 1
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
