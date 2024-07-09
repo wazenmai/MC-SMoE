@@ -929,7 +929,7 @@ def _merge_qwen_moe_experts_with_dominant(
     forwarded_hidden_states = forwarded_hidden_states.to(_device)
     print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {d_ff * num_ffn}, target_dim: {d_ff}, dominant_index: {dominant_index}")
     # Compute Permutation Matrix for gate_proj and up_proj
-    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn, device=_device) * coef[0]
+    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn, device=_device, dtype=_dtype) * coef[0]
     dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].gate_proj.weight.data, ffn_list[dominant_index].up_proj.weight.data)
     group_indexes = []
     for i in range(num_ffn):

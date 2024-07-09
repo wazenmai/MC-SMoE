@@ -1636,7 +1636,7 @@ def _merge_moe_experts_with_dominant(
     forwarded_hidden_states = forwarded_hidden_states.to(_device)
     print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {d_ff * num_ffn}, target_dim: {d_ff}, dominant_index: {dominant_index}")
     # Compute Permutation Matrix for w1 and w3
-    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn, device=_device) * coef[0]
+    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn, device=_device, dtype=_dtype) * coef[0]
     dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].w1.weight.data, ffn_list[dominant_index].w3.weight.data)
     group_indexes = []
     for i in range(num_ffn):
@@ -1698,6 +1698,179 @@ def _merge_moe_experts_with_dominant(
     merged_ffn.w1.weight.data = ffn_w1
     merged_ffn.w2.weight.data = ffn_w2
     merged_ffn.w3.weight.data = ffn_w3
+
+    return merged_ffn
+
+def _merge_mixtral_moe_by_activation_matching_within_and_across_models_same_rule_with_unmerge(
+    ffn_list: List[MixtralBlockSparseTop2MLP],
+    forwarded_hidden_states: torch.Tensor,
+    mini_batch_size: Optional[int] = None,
+    alpha_for_repeated_merging: Optional[float] = 0.1,
+    average_coefs: Optional[List[float]] = None,
+    input_weight: Optional[List[float]] = None,
+) -> MixtralBlockSparseTop2MLP:
+    print("merge: zipit-same-rule-without-unmerge")
+    ffn_list = [ffn.eval() for ffn in ffn_list]
+    concat_ffn = deepcopy(ffn_list[0])
+    d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
+    if input_weight is not None:
+        average_coefs = []
+        for w in input_weight:
+            coef = [w] * d_ff
+            average_coefs.extend(coef)
+    elif average_coefs is None:
+        average_coefs = [1.0] * len(ffn_list) * d_ff
+    elif len(average_coefs) == len(ffn_list):
+        average_coefs = [coef for coef in average_coefs for _ in range(d_ff)]
+    elif len(average_coefs) != len(ffn_list) * d_ff:
+        raise ValueError(
+            f"The length of average_coefs should be either {len(ffn_list)} or {len(ffn_list) * d_ff}, "
+            f"but got {len(average_coefs)}."
+        )
+    num_ffn = len(ffn_list)
+    # if len(forwarded_hidden_states) == 0 or len(forwarded_hidden_states) == 1:
+        # return concat_ffn
+    if mini_batch_size is None:
+        mini_batch_size = forwarded_hidden_states.shape[0]
+
+    _device = concat_ffn.w1.weight.device
+    ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=1) # (d_model, d_ff * num_ffn)
+    ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    concat_ffn.w1 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
+    concat_ffn.w2 = torch.nn.Linear(d_ff * num_ffn, d_model, bias=False)
+    concat_ffn.w3 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
+    concat_ffn.w1.weight.data = ffn_all_w1
+    concat_ffn.w2.weight.data = ffn_all_w2
+    concat_ffn.w3.weight.data = ffn_all_w3
+    # concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
+    # print("modified activation collecting!")
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+
+    # activations_dict = {}
+    handles = []
+    activations = []
+    # def get_hook(name):
+    #     def _activation_hook(module, input, output):
+    #         activations_dict[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
+    #     return _activation_hook
+    
+    def _activation_hook(module, input, output):
+        activations.append(input[0].detach().reshape(-1, input[0].shape[-1]))
+        return _activation_hook
+    
+    
+    handle = concat_ffn.w2.register_forward_hook(_activation_hook) 
+
+    print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape}")
+    
+    concat_ffn = concat_ffn.eval().to(forwarded_hidden_states.device)
+    
+
+    # for ffn_idx, ffn in enumerate(ffn_list):
+        # ffn = ffn.to(forwarded_hidden_states.device)
+        # activations_dict[ffn_idx] = []
+        # handles.append(ffn.w2.register_forward_hook(get_hook(ffn_idx)))
+
+
+    for i in range(0, forwarded_hidden_states.shape[0], mini_batch_size): # mini_batch_size = 10000
+        concat_ffn(forwarded_hidden_states[i:i + mini_batch_size])  # mini_batch_size * 14336 -> activation: mini_batch_size * 32768 * num_ffn
+        # for ffn_idx, ffn in enumerate(ffn_list):
+            # ffn(forwarded_hidden_states[i:i + mini_batch_size])
+    
+    for handle in handles:
+        handle.remove()
+    del handles, forwarded_hidden_states
+
+    # activations = []
+    # for i in range(len(activations_dict[0])):
+    #     concat_tensor = torch.cat([activations_dict[k][i] for k in range(len(activations_dict))], dim=1)
+    #     activations.append(concat_tensor)
+
+    # # activations = torch.cat(activations, dim=0).cuda()  # (batch_size * seq_len, d_ff * num_ffn)
+    activations = torch.cat(activations, dim=0)
+    # del activations_dict
+    # for ffn in ffn_list:
+        # ffn = ffn.cpu()
+    
+    print(f"Collected activations: {activations.shape} {activations.device}")
+
+    mean = activations.mean(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
+    std = activations.std(dim=0, keepdim=True)  # (1, d_ff * num_ffn)
+    covar = torch.mm(
+        (activations - mean).t(), # (50000,  32768 * num_ffn)
+        (activations - mean)
+    ) / (activations.shape[0] - 1)  # (d_ff * num_ffn, d_ff * num_ffn)
+    corr_matrix = covar / (std.t() * std + FP32_EPS)  # (d_ff * num_ffn, d_ff * num_ffn)
+    # print(torch.cuda.memory_summary())
+
+    del activations, covar, std, mean
+    torch.cuda.empty_cache()
+
+    corr_matrix[torch.arange(d_ff * num_ffn), torch.arange(d_ff * num_ffn)] = -1  # Remove self-correlation
+    print(f"corr_matrix: {corr_matrix.shape}")
+
+    # Greedy Merging!
+    while ffn_all_w1.shape[0] > d_ff:
+        # Select the most correlated pair
+        max_index = torch.argmax(corr_matrix)
+        max_i, max_j = max_index // corr_matrix.shape[0], max_index % corr_matrix.shape[0]
+
+        # Merge the most correlated pair, replace the first feature with the merged one
+        i_coef, j_coef = average_coefs[max_i], average_coefs[max_j]
+        ffn_all_w1[max_i] = (i_coef * ffn_all_w1[max_i] + j_coef * ffn_all_w1[max_j]) / (i_coef + j_coef + FP32_EPS)
+        ffn_all_w3[max_i] = (i_coef * ffn_all_w3[max_i] + j_coef * ffn_all_w3[max_j]) / (i_coef + j_coef + FP32_EPS)
+        ffn_all_w2[:, max_i] = (i_coef * ffn_all_w2[:, max_i] + j_coef * ffn_all_w2[:, max_j]) / (
+                i_coef + j_coef + FP32_EPS)
+       
+        # Remove the second feature
+        ffn_all_w1 = torch.cat([
+            ffn_all_w1[:max_j],
+            ffn_all_w1[max_j + 1:]
+        ], dim=0)
+        ffn_all_w3 = torch.cat([
+            ffn_all_w3[:max_j],
+            ffn_all_w3[max_j + 1:]
+        ], dim=0)
+        ffn_all_w2 = torch.cat([
+            ffn_all_w2[:, :max_j],
+            ffn_all_w2[:, max_j + 1:]
+        ], dim=1)
+
+        # Update the correlation matrix
+        updated_corr_vec = alpha_for_repeated_merging * torch.min(
+            torch.stack([corr_matrix[max_i], corr_matrix[max_j]]), dim=0
+        ).values
+        corr_matrix[max_i] = updated_corr_vec
+        corr_matrix[:, max_i] = updated_corr_vec
+        corr_matrix[max_i, max_i] = -1  # Remove self-correlation
+
+        # Remove the second feature from the correlation matrix
+        corr_matrix = torch.cat([
+            corr_matrix[:, :max_j],
+            corr_matrix[:, max_j + 1:]
+        ], dim=1)
+        corr_matrix = torch.cat([
+            corr_matrix[:max_j],
+            corr_matrix[max_j + 1:]
+        ], dim=0)
+
+        # Update the average coefs
+        average_coefs[max_i] += average_coefs[max_j]
+        average_coefs = average_coefs[:max_j] + average_coefs[max_j + 1:]
+
+    # handle.remove()
+    del corr_matrix
+    merged_ffn = deepcopy(ffn_list[0])
+   
+    merged_ffn.w1.weight.data = ffn_all_w1
+    merged_ffn.w2.weight.data = ffn_all_w2
+    merged_ffn.w3.weight.data = ffn_all_w3
+
+    # for ffn in ffn_list:
+    #     del ffn
+
+    # del ffn_all_w1, ffn_all_w2, ffn_all_w3, ffn_list
 
     return merged_ffn
 
