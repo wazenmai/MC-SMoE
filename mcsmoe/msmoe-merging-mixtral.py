@@ -155,7 +155,7 @@ def evaluate_mcsmoe(
             model.config.num_experts_per_tok = num_average_groups
         if not os.path.exists(output_path):
             os.makedirs(output_path)
-        torch.save(model.state_dict(), output_path+"/model.pth")
+        # torch.save(model.state_dict(), output_path+"/model.pth")
 
     if eval_ppl:
         evaluate_minipile_perplexity(

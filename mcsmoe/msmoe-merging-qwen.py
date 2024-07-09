@@ -122,7 +122,7 @@ def evaluate_mcsmoe(
         print("[TAMP] Number of parameters after merging:", model.num_parameters())
         if not os.path.exists(output_path):
             os.makedirs(output_path)
-        torch.save(model.state_dict(), output_path+"/model.pth")
+        # torch.save(model.state_dict(), output_path+"/model.pth")
 
     if eval_ppl:
         evaluate_minipile_perplexity(
