@@ -19,17 +19,21 @@ def evaluate_mcsmoe(
         task: str,
         num_average_groups: int,
         model_name: Optional[str] = "Qwen/Qwen1.5-MoE-A2.7B-Chat",
-        dominant: Optional[str] = "frequency", # random, frequency, knowledge
-        similarity_base: Optional[str] = "router-logits",
-        mode: Optional[str] = "normal", 
-        merge: Optional[str] = "zipit", # zipit, freq
-        num_fewshot: Optional[int] = 0,
+        dominant: Optional[str] = "knowledge", # random, frequency, knowledge
+        similarity_base: Optional[str] = "router-logits", # router-logits, weight, expert-output
+        merge: Optional[str] = "zipit", # no, freq, zipit, update, fix-dom, unmerge, kl-weight, fix-dom-same
+        mode: Optional[str] = "normal", # normal, activation-with-router-logits, input-weight, all
         n_sentences: Optional[int] = 32,
         train_batch_size: Optional[int] = 4,
         eval_batch_size: Optional[int] = 32,
         partition: Optional[int] = 1,
+        start_layer: Optional[int] = 0,
         output_path: Optional[str] = None,
         result_path: Optional[str] = None,
+        model_path: Optional[str] = None,
+        group_limit: Optional[int] = 4,
+        data_limit: Optional[int] = 1000000,
+        num_fewshot: Optional[int] = 0,
 ):
     print(f"Merge model {model_name} with {num_average_groups} group, {dominant} dominant + {similarity_base} grouping + zipit {mode} merge, evaluate on {task}")
 
@@ -40,17 +44,12 @@ def evaluate_mcsmoe(
         "Qwen/Qwen1.5-MoE-A2.7B-Chat",
         torch_dtype=torch.float16, device_map="auto"
     )
-    if model_name != "Qwen/Qwen1.5-MoE-A2.7B-Chat":
+    if model_path:
         model.load_state_dict(torch.load(model_name))
     model.eval()
 
-    # dataloader_for_merging = get_minipile_dataloder(
-    #     tokenizer=tokenizer,
-    #     block_size=512,
-    #     batch_size=1,
-    #     subset_ratio=0.1,
-    # )
 
+    # TAMP!
     if merge != "no":
         dataloader_for_merging = get_calib_dataloder(
             dataset="c4",
@@ -61,10 +60,14 @@ def evaluate_mcsmoe(
             num_workers=4,
         )
 
-    # MC-SMoE!
-    if merge != "no":
-        print(f"[MC-SMoE] Merging into average {num_average_groups} groups...")
-        grouper = ExpertsGrouperForQwen2MoE(config=model.config, similarity_base=similarity_base)
+        print(f"[TAMP] Merging into average {num_average_groups} groups...")
+        grouper = ExpertsGrouperForQwen2MoE(
+            config=model.config,
+            similarity_base=similarity_base,
+            start_layer=start_layer,
+            group_limit=group_limit,
+            data_limit=data_limit,
+        )
         grouper.compute_all_similarities(model, dataloader_for_merging)
         
         if dominant == "random":
@@ -87,6 +90,7 @@ def evaluate_mcsmoe(
                     qwen_model=model,
                     grouper=grouper,
                     dataloader=dataloader_for_merging,
+                    merge=merge,
                     mode=mode,
                     dominant_alone=False,
                     usage_weighted=False
@@ -95,6 +99,7 @@ def evaluate_mcsmoe(
             model = grouper.all_in_one_knowledge_dominant(
                 model=model, 
                 dataloader=dataloader_for_merging, 
+                merge=merge,
                 mode=mode,
                 num_groups=num_average_groups,
             )
@@ -104,7 +109,7 @@ def evaluate_mcsmoe(
         
 
 
-        print(f"[MC-SMoE] ========= Grouping results ========= ")
+        print(f"[TAMP] ========= Grouping results ========= ")
         for name, state in grouper.group_state_dict().items():
             if dom_experts is None:
                 print(f"Group {name}: {state.tolist()}")
@@ -113,7 +118,7 @@ def evaluate_mcsmoe(
 
         del grouper
 
-        print("[MC-SMoE] Number of parameters after merging:", model.num_parameters())
+        print("[TAMP] Number of parameters after merging:", model.num_parameters())
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         torch.save(model.state_dict(), output_path+"/model.pth")

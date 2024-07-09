@@ -1135,6 +1135,7 @@ class ExpertsGrouperForMixtral(object):
                 core_expert_indices=core_experts[moe_name] if core_experts is not None else None,
                 usage_frequencies=self._usage_frequency_state_dict[moe_name] if usage_weighted else None,
                 moe_scores=origin_moe_scores,
+                data_limit=self.data_limit,
             )
 
             del layer_forwarded_hidden_states

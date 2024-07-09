@@ -14,7 +14,7 @@ from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBl
 
 from .utils import generate_random_group_labels
 from mcsmoe.utils.constants import FP32_EPS
-from mcsmoe.models.qwen import merged_qwen2moe_forward
+from mcsmoe.models.qwen import merged_qwen2moe_forward, Qwen2MoEWrapper
 
 SIMILARITY_MAPPING_FUNCTION = {
     "cosine": lambda x, y: (F.cosine_similarity(x, y, dim=-1, eps=FP32_EPS) + 1).item() / 2,
@@ -32,6 +32,9 @@ class ExpertsGrouperForQwen2MoE(object):
             config: Qwen2MoeConfig,
             similarity_fn: str = "cosine",
             similarity_base: str = "router-logits",
+            start_layer: int = 0,
+            group_limit: int = 4,
+            data_limit: int = 1000000,
     ):
         if similarity_fn not in SIMILARITY_MAPPING_FUNCTION:
             raise ValueError(
@@ -45,8 +48,11 @@ class ExpertsGrouperForQwen2MoE(object):
         self.d_model = config.hidden_size
         self.d_ff = config.moe_intermediate_size
         self.top_k = config.num_experts_per_tok
+        self.num_experts = config.num_experts
+        self.group_limit = group_limit
+        self.data_limit = data_limit
 
-        self.sparse_layer_indices = list(range(0, config.num_hidden_layers))
+        self.sparse_layer_indices = list(range(start_layer, config.num_hidden_layers))
         self.similarity_fn = SIMILARITY_MAPPING_FUNCTION[similarity_fn]
         self.similarity_base = similarity_base
         self._group_state_dict = None
@@ -115,8 +121,9 @@ class ExpertsGrouperForQwen2MoE(object):
                 usage_frequency_dict[ffn_name] = torch.ones_like(usage_frequency_dict[ffn_name])
 
             # 2. Each layer must have at least one group, set the most used expert in a layer to frequency 1.
-            max_usage_index = torch.argmax(usage_frequency_dict[ffn_name])
-            usage_frequency_dict[ffn_name][max_usage_index] = 1.0
+            k = (self.num_experts // self.group_limit) + 1 if (self.num_experts % self.group_limit) != 0 else (self.num_experts // self.group_limit)
+            # max_usage_index = torch.argmax(usage_frequency_dict[ffn_name])
+            # usage_frequency_dict[ffn_name][max_usage_index] = 1.0
 
             # 3. Collect all usage frequency.
             all_usage_frequency.append(usage_frequency_dict[ffn_name])
@@ -379,6 +386,7 @@ class ExpertsGrouperForQwen2MoE(object):
             self,
             model: Qwen2MoeForCausalLM,
             dataloader: DataLoader,
+            merge: Optional[str] = "zipit"
             mode: Optional[str] = "normal",
             num_groups: Optional[int] = 30,
             dominant_alone: Optional[bool] = False,
@@ -399,7 +407,9 @@ class ExpertsGrouperForQwen2MoE(object):
         
         for layer_idx in self.sparse_layer_indices:
             _st = time.time()
-            _device = model.model.layers[layer_idx].mlp.experts[0].gate_proj.weight.device
+            moe = model.model.layers[layer_idx].mlp
+            _device = moe.experts[0].gate_proj.weight.device
+            _dtype = moe.experts[0].gate_proj.weight.dtype
             moe_name = f"model.layers.{layer_idx}.mlp"
             print(f"[Process-Start] === Layer {layer_idx} / {len(self.sparse_layer_indices)} -> {moe_name} ===")
 
@@ -412,9 +422,9 @@ class ExpertsGrouperForQwen2MoE(object):
             # model.zero_grad()
             for p in model.parameters():
                 p.requires_grad_(False)
-            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
-            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(_device)
-            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(_device)
+            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff, device=_device)
+            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff, device=_device)
+            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=_dtype, device=_device)
             moe_masks.requires_grad_(True)
 
             # Zipit variables
@@ -508,7 +518,8 @@ class ExpertsGrouperForQwen2MoE(object):
             print(f"moe_rep_kl: {moe_rep_kl.shape} {moe_rep_kl}")
 
             # 2.5 Compute score
-            moe_scores = (moe_rep_kl * lam_rep + moe_pred_kl * lam_pred).mean(dim=-1) # (E,)
+            origin_moe_scores = (moe_rep_kl * lam_rep + moe_pred_kl * lam_pred)
+            moe_scores = origin_moe_scores.mean(dim=-1) # (E,)
             print(f"moe_scores: {moe_scores.shape} {moe_scores}")
 
             if layer_idx == 0:
@@ -521,18 +532,54 @@ class ExpertsGrouperForQwen2MoE(object):
 
             # STEP: 3. Choose dominant experts by knowledge, group them by similarity
             print(f"[Process-Grouping] === Choose dominant experts by knowledge, group them by similarity {self.similarity_base} ===")
+            group_member_count = torch.zeros(num_groups)
             indices_sorted_by_kl = torch.argsort(moe_scores, descending=True).cpu()
             core_expert_indices = indices_sorted_by_kl[:num_groups]
+            print("core_expert_indices: ", core_expert_indices)
             core_experts[moe_name] = core_expert_indices.tolist()
+            group_dict = {}          
             for i in range(num_groups):
                 self._group_state_dict[moe_name][core_expert_indices[i]] = i
+                group_member_count[i] += 1
+                group_dict[i] = [core_expert_indices[i]]
             similarity_matrix = self.get_similarity_matrix(moe_name)
-            for i in range(num_groups, self.num_experts):
+            for i in range(0, self.num_experts): # assign group label to left experts
+                if i in core_expert_indices:
+                    continue
+            # for i in range(num_groups, self.num_experts):
                 most_similar_core = core_expert_indices[
                     torch.argmax(similarity_matrix[i, core_expert_indices])
                 ]
                 most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
                 self._group_state_dict[moe_name][i] = most_similar_group_label
+                group_member_count[most_similar_group_label] += 1
+                group_dict[most_similar_group_label.item()].append(i)
+                print(f"--expert {i} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
+                if group_member_count[self._group_state_dict[moe_name][i]] > self.group_limit:
+                    if len(core_expert_indices) == 1 and self.group_limit < self.num_experts:
+                        raise ValueError(
+                            f"[Merging]The number of groups at Encoder layer {layer_idx} is too small!"
+                        )
+                    
+                    while group_membert_count[most_similar_group_label] > self.group_limit:
+                        print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
+                        # Find the most unsimilar expert in the exceed group
+                        sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label]]
+                        unsimilar_idx = torch.argmin(sim)
+                    
+                        group_member_count[self._group_state_dict[moe_name][i]] -= 1
+                        similarity_matrix[unsimilar_idx, most_similar_core] = -1
+                        similarity_matrix[most_similar_core, unsimilar_idx] = -1
+                        print(f"----kick out {unsimilar_idx} from group ")
+                        # Reassign group label
+                        most_similar_core = core_expert_indices[
+                            torch.argmax(similarity_matrix[unsimilar_idx, core_expert_indices])
+                        ]
+                        most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
+                        self._group_state_dict[moe_name][unsimilar_idx] = most_similar_group_label
+                        group_member_count[most_similar_group_label] += 1
+                        group_dict[most_similar_group_label.item()].append(unsimilar_idx)
+                        print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
             print(f"core expert: {core_experts[moe_name]}")
 
             # STEP: 4. Zipit Merge
@@ -562,9 +609,12 @@ class ExpertsGrouperForQwen2MoE(object):
                 group_labels=group_labels,
                 forwarded_hidden_states=layer_forwarded_hidden_states,
                 dominant_alone=dominant_alone,
+                merge=merge,
                 mode=mode,
                 core_expert_indices=core_experts[moe_name] if core_experts is not None else None,
                 usage_frequencies=self._usage_frequency_state_dict[moe_name] if usage_weighted else None,
+                moe_scores=origin_moe_scores,
+                data_limit=self.data_limit,
             )
 
             del layer_forwarded_hidden_states
@@ -629,7 +679,102 @@ def _merge_mlp_experts_by_usage_frequency_weighting(
     return ffn
 
 @torch.no_grad()
-def merge_qwen_moe_by_activation_matching_within_and_across_models(
+def _merge_qwen_moe_by_knowledge_weight(
+    ffn_list: List[Qwen2MoeMLP],
+    knowledge_weight: torch.Tensor,
+) -> Qwen2MoeMLP:
+    d_ff, d_model = ffn_list[0].gate_proj.out_features, ffn_list[0].gate_proj.in_features
+    num_ffn = len(ffn_list)
+    
+    col_sum = knowledge_weight.sum(dim=0, keepdim=True)
+    knowledge_weight = (knowledge_weight / col_sum)
+    knowledge = knowledge_weight.reshape(1, -1) # (ExN) -> (1xEN)
+    
+    print(knowledge_weight.shape, knowledge.shape)
+    print(knowledge_weight)
+
+    ffn_all_gate_proj = knowledge.T * torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0).to(knowledge.dtype)
+    ffn_all_down_proj = knowledge * torch.cat([ffn.down_proj.weight.data for ffn in ffn_list], dim=1).to(knowledge.dtype)
+    ffn_all_up_proj = knowledge.T * torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0).to(knowledge.dtype)
+    
+    print(ffn_all_gate_proj.shape)
+
+    ffn_all_gate_proj = ffn_all_gate_proj.reshape(d_ff, num_ffn, d_model)
+    ffn_all_down_proj = ffn_all_down_proj.reshape(d_model, num_ffn, d_ff)
+    ffn_all_up_proj = ffn_all_up_proj.reshape(d_ff, num_ffn, d_model)
+
+    ffn_gate_proj = ffn_all_gate_proj.sum(dim=1)
+    ffn_down_proj = ffn_all_down_proj.sum(dim=1)
+    ffn_up_proj = ffn_all_up_proj.sum(dim=1)
+
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.gate_proj.weight.data = ffn_gate_proj.to(ffn_list[0].gate_proj.weight.dtype)
+    merged_ffn.down_proj.weight.data = ffn_down_proj.to(ffn_list[0].down_proj.weight.dtype)
+    merged_ffn.up_proj.weight.data = ffn_up_proj.to(ffn_list[0].up_proj.weight.dtype)
+    return merged_ffn
+
+def remove_col(x, idx):
+    return torch.cat([x[:, :idx], x[:, idx+1:]], dim=-1)
+
+def remove_row(x, idx):
+    return torch.cat([x[:idx], x[idx+1:]], dim=0)
+
+@torch.no_grad()
+def _zipit_merge(temp_dim, target_dim, weight1, weight3, data, _device, _dtype):
+    permutation_matrix = torch.eye(temp_dim, temp_dim, dtype=_dtype, device=_device)
+    ROUND = 0
+    act = torch.nn.SiLU()
+    while temp_dim > target_dim:
+        ROUND += 1
+        odd = temp_dim % 2
+        target_dim_this_round = max(target_dim, temp_dim // 2 + odd)
+        print(f"ROUND {ROUND}. From {temp_dim} to {target_dim_this_round}")
+        
+        ### Collect activations
+        activations = []
+        if weight3 is None:
+            cur = torch.matmul(data, weight1.T)
+        else:
+            cur = act(torch.matmul(data, weight1.T)) * torch.matmul(data, weight3.T)
+        activations.append(cur.reshape(-1, cur.shape[-1]))
+        activations = torch.cat(activations, dim=0)
+        print("Activations: ", activations.shape)
+        ### Compute covariance
+        mean = activations.mean(dim=0, keepdim=True)
+        std = activations.std(dim=0, keepdim=True)
+        covar = torch.matmul((activations - mean).T, activations - mean) / (activations.shape[0] - 1)
+        corr_matrix = covar / (std.T * std + FP32_EPS)
+        del mean, std, covar
+        torch.cuda.empty_cache()
+        corr_matrix[torch.arange(temp_dim), torch.arange(temp_dim)] = -1 # Remove self-correlation
+        print(corr_matrix)
+        ### Merge temp_dim / 2 times
+        for _ in range(temp_dim - target_dim_this_round):
+            max_index = torch.argmax(corr_matrix)
+            row, col = max_index // corr_matrix.shape[0], max_index % corr_matrix.shape[0]
+            permutation_matrix[:, row] += permutation_matrix[:, col]
+            permutation_matrix = remove_col(permutation_matrix, col)
+
+            # row_coef, col_coef = average_coefs[row], average_coefs[col]
+            row_coef, col_coef = 1.0, 1.0
+            weight1[row] = (row_coef * weight1[row] + col_coef * weight1[col]) / (row_coef + col_coef + FP32_EPS)
+            if weight3 is not None:
+                weight3[row] = (row_coef * weight3[row] + col_coef * weight3[col]) / (row_coef + col_coef + FP32_EPS)
+                weight3 = remove_row(weight3, col)
+            weight1 = remove_row(weight1, col)
+            
+            corr_matrix[row] = FP32_EPS # set very small number to avoid repeated merging
+            corr_matrix[:, row] = FP32_EPS
+            corr_matrix[row, row] = -1
+            corr_matrix = remove_col(corr_matrix, col)
+            corr_matrix = remove_row(corr_matrix, col)
+        temp_dim = weight1.shape[0]
+    for i in range(20): # permutation_matrix.shape[1]
+        print(permutation_matrix[:, i].nonzero().squeeze())
+    return permutation_matrix
+
+@torch.no_grad()
+def _merge_qwen_moe_by_zipit(
     ffn_list: List[Qwen2MoeMLP],
     forwarded_hidden_states: torch.Tensor,
     mini_batch_size: Optional[int] = None,
@@ -637,7 +782,350 @@ def merge_qwen_moe_by_activation_matching_within_and_across_models(
     average_coefs: Optional[List[float]] = None,
     input_weight: Optional[List[float]] = None,
 ) -> Qwen2MoeMLP:
+    d_ff, d_model = ffn_list[0].gate_proj.out_features, ffn_list[0].gate_proj.in_features
+    num_ffn = len(ffn_list)
+    temp_dim = d_ff * num_ffn
+    average_coefs = [1.0] * temp_dim
+    act = torch.nn.SiLU()
+
+    _device = ffn_list[0].gate_proj.weight.device
+    _dtype = ffn_list[0].gate_proj.weight.dtype
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+    print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {temp_dim}, target_dim: {d_ff}")
+
+    ### Merge gate_proj and up_proj
+    ffn_all_gate_proj = torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_up_proj = torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    first_permutation_matrix = _zipit_merge(d_ff * num_ffn, d_ff, ffn_all_gate_proj, ffn_all_up_proj, forwarded_hidden_states, _device, _dtype)
+    first_unmerge_matrix = first_permutation_matrix
+    first_merge_matrix = torch.div(first_permutation_matrix, torch.sum(first_permutation_matrix, dim=0, keepdim=True))
+
+    ffn_all_gate_proj = torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_up_proj = torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_gate_proj = torch.matmul(first_merge_matrix.T, ffn_all_gate_proj)
+    ffn_up_proj = torch.matmul(first_merge_matrix.T, ffn_all_up_proj)
+
+    ### Merge down_proj
+    new_data = act(torch.matmul(forwarded_hidden_states, ffn_gate_proj.T)) * torch.matmul(forwarded_hidden_states, ffn_up_proj.T)
+    ffn_all_down_proj = torch.cat([ffn.down_proj.weight.data for ffn in ffn_list], dim=0) # (d_model * num_ffn, d_ff)
+    second_permutation_matrix = _zipit_merge(d_model * num_ffn, d_model, ffn_all_down_proj, None, new_data, _device, _dtype)
+    second_merge_matrix = torch.div(second_permutation_matrix, torch.sum(second_permutation_matrix, dim=0, keepdim=True))
+    second_unmerge_matrix = second_permutation_matrix
+    ffn_down_proj = torch.zeros(d_model, d_ff).to(_device)
+    for i in range(num_ffn):
+        ffn_down_proj += torch.matmul(second_merge_matrix.T[:, i*d_model:(i+1)*d_model], torch.matmul(ffn_all_down_proj[i*d_model:(i+1)*d_model], first_unmerge_matrix.T[:, i*d_ff:(i+1)*d_ff]))
+
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.gate_proj.weight.data = ffn_gate_proj
+    merged_ffn.down_proj.weight.data = ffn_down_proj
+    merged_ffn.up_proj.weight.data = ffn_up_proj
+
+    return merged_ffn
+
+@torch.no_grad()
+def collect_act(data, weight1, weight3=None):
+    activations = []
+    act = torch.nn.SiLU()
+    if weight3 is not None:
+        cur = act(torch.matmul(data, weight1.T)) * torch.matmul(data, weight3.T)
+    else:
+        cur = torch.matmul(data, weight1.T)
+    activations.append(cur.reshape(-1, cur.shape[-1]))
+    return torch.cat(activations, dim=0)
+
+@torch.no_grad()
+def compute_covariance(act1, act2):
+    mean1 = act1.mean(dim=0, keepdim=True)
+    mean2 = act2.mean(dim=0, keepdim=True)
+    std1 = act1.std(dim=0, keepdim=True)
+    std2 = act2.std(dim=0, keepdim=True)
+    corr_matrix = torch.matmul((act1 - mean1).T, act2 - mean2) / (act1.shape[0] - 1)
+    corr_matrix = corr_matrix / (std1.T * std2 + FP32_EPS)
+    return corr_matrix
+
+def compute_permutation(data, ffn_list, dom_ind):
+    dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].gate_proj.weight.data, ffn_list[dominant_index].up_proj.weight.data)
+    group_indexes = []
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(forwarded_hidden_states, ffn_list[i].gate_proj.weight.data, ffn_list[i].up_proj.weight.data)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
     
+    permutation_matrix = torch.eye(d_ff, temp_dim).to(_device).to(torch.float16)
+    for i in range(d_ff):
+        for j in range(corr_matrix.shape[1]):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (i + 1)
+            permutation_matrix[i, index_in_this_group] = 1
+    permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    return permutation_matrix
+
+@torch.no_grad()
+def _merge_qwen_moe_experts_with_dominant(
+        ffn_list: List[Qwen2MoeMLP],
+        forwarded_hidden_states: torch.Tensor,
+        mini_batch_size: Optional[int] = None,
+        alpha_for_repeated_merging: Optional[float] = 0.1,
+        average_coefs: Optional[List[float]] = None,
+        input_weight: Optional[List[float]] = None,
+        dominant_index: Optional[int] = 0,
+) -> Qwen2MoeMLP:
+    print("merge: fix-dom-independent-rule-without-unmerge")
+    d_ff, d_model = ffn_list[0].gate_proj.out_features, ffn_list[0].gate_proj.in_features
+    num_ffn = len(ffn_list)
+    need_pinv = False
+    if input_weight is not None:
+        coef = input_weight
+        need_pinv = True
+    elif average_coefs is None:
+        coef = [1.0] * num_ffn
+    elif len(average_coefs) == num_ffn:
+        coef = average_coefs
+        need_pinv = True
+    else:
+        coef = [1.0] * num_ffn
+    
+    if dominant_index != 0:
+        ffn_list[0], ffn_list[dominant_index] = ffn_list[dominant_index], ffn_list[0]
+    print("dominant_index: ", dominant_index)
+    _device = ffn_list[0].gate_proj.weight.device
+    _dtype = ffn_list[0].gate_proj.weight.dtype
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+    print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {d_ff * num_ffn}, target_dim: {d_ff}, dominant_index: {dominant_index}")
+    # Compute Permutation Matrix for gate_proj and up_proj
+    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn, device=_device) * coef[0]
+    dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].gate_proj.weight.data, ffn_list[dominant_index].up_proj.weight.data)
+    group_indexes = []
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(forwarded_hidden_states, ffn_list[i].gate_proj.weight.data, ffn_list[i].up_proj.weight.data)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
+    for i in range(d_ff):
+        for j in range(num_ffn - 1):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (j + 1)
+            permutation_matrix[i, index_in_this_group] = coef[j]
+    if not need_pinv:
+        unmerge_1 = permutation_matrix
+        permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    else:
+        permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+        unmerge_1 = torch.linalg.pinv(permutation_matrix.to(torch.float)).to(_dtype).T
+        permutation_matrix = permutation_matrix.to(_dtype)
+    
+    print(f"first permutation_matrix: {permutation_matrix.shape} {permutation_matrix[0]}")
+    ffn_all_gate_proj = torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_up_proj = torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_gate_proj = torch.matmul(permutation_matrix, ffn_all_gate_proj)
+    ffn_up_proj = torch.matmul(permutation_matrix, ffn_all_up_proj)
+
+    del ffn_all_gate_proj, ffn_all_up_proj
+
+    # Compute Permutation Matrix for down_proj
+    permutation_matrix = torch.eye(d_model, d_model * num_ffn, dtype=_dtype, device=_device) * coef[0]
+    new_data = collect_act(forwarded_hidden_states, ffn_gate_proj, ffn_up_proj)
+    dom_act = collect_act(new_data, ffn_list[dominant_index].down_proj.weight.data, None)
+    group_indexes.clear()
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(new_data, ffn_list[i].down_proj.weight.data, None)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
+    for i in range(d_model):
+        for j in range(num_ffn - 1):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_model * (j + 1)
+            permutation_matrix[i, index_in_this_group] = coef[j]
+    permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    print(f"second permutation_matrix: {permutation_matrix.shape} {permutation_matrix[0]}")
+    ffn_all_down_proj = torch.cat([ffn.down_proj.weight.data for ffn in ffn_list], dim=0) # (d_model * num_ffn, d_ff)
+    ffn_down_proj = torch.zeros(d_model, d_ff).to(_device)
+    for i in range(num_ffn):
+        ffn_down_proj += torch.matmul(permutation_matrix[:, i*d_model:(i+1)*d_model],
+            torch.matmul(ffn_all_down_proj[i*d_model:(i+1)*d_model], 
+                         unmerge_1[:, i*d_ff:(i+1)*d_ff])
+        )
+
+    del ffn_all_down_proj
+
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.gate_proj.weight.data = ffn_gate_proj
+    merged_ffn.down_proj.weight.data = ffn_down_proj
+    merged_ffn.up_proj.weight.data = ffn_up_proj
+
+    return merged_ffn
+
+@torch.no_grad()
+def _merge_qwen_moe_experts_with_dominant_same_rule(
+        ffn_list: List[Qwen2MoeMLP],
+        forwarded_hidden_states: torch.Tensor,
+        mini_batch_size: Optional[int] = None,
+        alpha_for_repeated_merging: Optional[float] = 0.1,
+        average_coefs: Optional[List[float]] = None,
+        input_weight: Optional[List[float]] = None,
+        dominant_index: Optional[int] = 0,
+):
+    print("merge: fix-dom-same-rule-without-unmerge")
+    d_ff, d_model = ffn_list[0].gate_proj.out_features, ffn_list[0].gate_proj.in_features
+    num_ffn = len(ffn_list)
+    if input_weight is not None:
+        coef = input_weight
+    elif average_coefs is None:
+        coef = [1.0] * num_ffn
+    elif len(average_coefs) == num_ffn:
+        coef = average_coefs
+    else:
+        coef = [1.0] * num_ffn
+    
+    if dominant_index != 0:
+        ffn_list[0], ffn_list[dominant_index] = ffn_list[dominant_index], ffn_list[0]
+    print("dominant_index: ", dominant_index)
+    _device = ffn_list[0].gate_proj.weight.device
+    _dtype = ffn_list[0].gate_proj.weight.dtype
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+    print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {d_ff * num_ffn}, target_dim: {d_ff}, dominant_index: {dominant_index}")
+    # Compute Permutation Matrix for gate_proj and up_proj
+    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn, dtype=_dtype, device=_device) * coef[0]
+    dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].gate_proj.weight.data, ffn_list[dominant_index].up_proj.weight.data)
+    group_indexes = []
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(forwarded_hidden_states, ffn_list[i].gate_proj.weight.data, ffn_list[i].up_proj.weight.data)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
+    for i in range(d_ff):
+        for j in range(num_ffn - 1):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (j + 1)
+            permutation_matrix[i, index_in_this_group] = coef[j]
+    permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    print(f"first permutation_matrix: {permutation_matrix.shape} {permutation_matrix[0]}")
+    ffn_all_gate_proj = torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_down_proj = torch.cat([ffn.down_proj.weight.data for ffn in ffn_list], dim=1) # (d_model, d_ff * num_ffn)
+    ffn_all_up_proj = torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_gate_proj = torch.matmul(permutation_matrix, ffn_all_gate_proj)
+    ffn_down_proj = torch.matmul(permutation_matrix, ffn_all_down_proj.T)
+    ffn_up_proj = torch.matmul(permutation_matrix, ffn_all_up_proj)
+
+    del ffn_all_gate_proj, ffn_all_down_proj, ffn_all_up_proj
+
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.gate_proj.weight.data = ffn_gate_proj
+    merged_ffn.down_proj.weight.data = ffn_down_proj.T
+    merged_ffn.up_proj.weight.data = ffn_up_proj
+
+    return merged_ffn
+
+@torch.no_grad()
+def compute_merging(temp_dim, target_dim, corr_matrix, coef, alpha, _device):
+    permutation_matrix = torch.eye(temp_dim, temp_dim, dtype=torch.float, device=_device)
+    while corr_matrix.shape[0] > target_dim:
+        max_index = torch.argmax(corr_matrix)
+        max_i, max_j = max_index // corr_matrix.shape[0], max_index % corr_matrix.shape[0]
+
+        # Update permutation matrix
+        i_coef, j_coef = coef[max_i], coef[max_j]
+        permutation_matrix[:, max_i] = (i_coef * permutation_matrix[:, max_i] + j_coef * permutation_matrix[:, max_j]) / (i_coef + j_coef + FP32_EPS)
+        permutation_matrix = remove_col(permutation_matrix, max_j)
+
+        # Update corr_matrix
+        updated_corr_vec = alpha * torch.min(torch.stack([corr_matrix[max_i], corr_matrix[max_j]]), dim=0).values
+        corr_matrix[max_i] = updated_corr_vec
+        corr_matrix[:, max_i] = updated_corr_vec
+        corr_matrix[max_i, max_i] = -1
+        # Remove second feature from the correlation matrix
+        corr_matrix = remove_col(corr_matrix, max_j)
+        corr_matrix = remove_row(corr_matrix, max_j)
+    return permutation_matrix
+
+@torch.no_grad()
+def _merge_qwen_moe_by_zipit_with_unmerge(
+    ffn_list: List[Qwen2MoeMLP],
+    forwarded_hidden_states: torch.Tensor,
+    mini_batch_size: Optional[int] = 5000,
+    alpha_for_repeated_merging: Optional[float] = 0.1,
+    average_coefs: Optional[List[float]] = None,
+    input_weight: Optional[List[float]] = None,
+):
+    print("merge: zipit-independe-rule-with-unmerge")
+    ffn_list = [ffn.eval() for ffn in ffn_list]
+    d_ff, d_model = ffn_list[0].gate_proj.out_features, ffn_list[0].gate_proj.in_features
+    num_ffn = len(ffn_list)
+    first_coef, second_coef = process_coef(num_ffn, d_ff, d_model, average_coefs, input_weight)
+    
+    _device = ffn_list[0].gate_proj.weight.device
+    _dtype = ffn_list[0].gate_proj.weight.dtype
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+    print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape}")
+
+    # Compute gate_proj and up_proj's permutation matrix
+    ffn_all_gate_proj = torch.cat([ffn.gate_proj.weight.data for ffn in ffn_list], dim=0) # 
+    ffn_all_up_proj = torch.cat([ffn.up_proj.weight.data for ffn in ffn_list], dim=0)
+    act = torch.nn.SiLU()
+
+    activations = []
+    cur = act(torch.matmul(forwarded_hidden_states, ffn_all_gate_proj.T)) * torch.matmul(forwarded_hidden_states, ffn_all_up_proj.T)
+    activations.append(cur.reshape(-1, cur.shape[-1]))
+    cat_activtaions = torch.cat(activations, dim=0)
+    activations.clear()
+    corr_matrix = compute_correlation(cat_activtaions)
+    corr_matrix[torch.arange(d_ff * num_ffn), torch.arange(d_ff * num_ffn)] = -1  # Remove self-correlation
+    print(f"corr_matrix: {corr_matrix.shape}")
+    first_permutation_matrix = compute_merging(d_ff * num_ffn, d_ff, corr_matrix, first_coef, alpha_for_repeated_merging, _device)
+    first_permutation_matrix = first_permutation_matrix / torch.sum(first_permutation_matrix, dim=0, keepdim=True)
+    first_unmerge_matrix = torch.linalg.pinv(first_permutation_matrix)
+    first_permutation_matrix = first_permutation_matrix.to(_dtype)
+    ffn_gate_proj = torch.matmul(first_permutation_matrix.T, ffn_all_gate_proj)
+    ffn_up_proj = torch.matmul(first_permutation_matrix.T, ffn_all_up_proj)
+    print(f"first_permutation_matrix: {first_permutation_matrix.shape}, first_unmerge_matrix: {first_unmerge_matrix.shape}")
+    
+    # Compute down_proj's permutation matrix
+    ffn_all_down_proj = torch.cat([ffn.down_proj.weight.data for ffn in ffn_list], dim=0)
+    new_data = act(torch.matmul(forwarded_hidden_states, ffn_gate_proj.T)) * torch.matmul(forwarded_hidden_states, ffn_up_proj.T)
+    activations = []
+    new_cur = torch.matmul(new_data, ffn_all_down_proj.T)
+    activations.append(new_cur.reshape(-1, new_cur.shape[-1]))
+    cat_activtaions = torch.cat(activations, dim=0)
+    activations.clear()
+    corr_matrix = compute_correlation(cat_activtaions)
+    corr_matrix[torch.arange(d_model * num_ffn), torch.arange(d_model * num_ffn)] = -1  # Remove self-correlation
+    print(f"corr_matrix: {corr_matrix.shape}")
+    second_permutation_matrix = compute_merging(d_model * num_ffn, d_model, corr_matrix, second_coef, alpha_for_repeated_merging, _device)
+    second_permutation_matrix = second_permutation_matrix / torch.sum(second_permutation_matrix, dim=0, keepdim=True)
+    second_unmerge_matrix = torch.linalg.pinv(second_permutation_matrix) # DxED
+    print(f"second_permutation_matrix: {second_permutation_matrix.shape}, second_unmerge_matrix: {second_unmerge_matrix.shape}")
+    second_permutation_matrix = second_permutation_matrix.to(_device).to(_dtype)
+    first_unmerge_matrix = first_unmerge_matrix.to(_device).to(_dtype)
+    ffn_down_proj = torch.zeros(d_model, d_ff, device=_device)
+    for i in range(num_ffn):
+        ffn_down_proj += torch.matmul(second_permutation_matrix.T[:, i*d_model:(i+1)*d_model], 
+            torch.matmul(ffn_all_down_proj[i*d_model:(i+1)*d_model], first_unmerge_matrix[:, i*d_ff:(i+1)*d_ff]))
+    
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.gate_proj.weight.data = ffn_gate_proj
+    merged_ffn.down_proj.weight.data = ffn_down_proj
+    merged_ffn.up_proj.weight.data = ffn_up_proj
+    
+    # TODO: use a warpper to warp moe and assign unmerge matrix to it
+    # TODO: consider (gate_proj, up_proj) and (down_proj) has differnt unmerge matrix, use down_proj's unmerge matrix to unmerge down_proj's output
+    return merged_ffn, second_unmerge_matrix
+
+@torch.no_grad()
+def _merge_qwen_moe_by_activation_matching_within_and_across_models(
+    ffn_list: List[Qwen2MoeMLP],
+    forwarded_hidden_states: torch.Tensor,
+    mini_batch_size: Optional[int] = None,
+    alpha_for_repeated_merging: Optional[float] = 0.1,
+    average_coefs: Optional[List[float]] = None,
+    input_weight: Optional[List[float]] = None,
+) -> Qwen2MoeMLP:
+    print("merge: zipit-same-rule-without-unmerge")
     ffn_list = [ffn.eval() for ffn in ffn_list]
     concat_ffn = deepcopy(ffn_list[0])
     d_ff, d_model = concat_ffn.gate_proj.out_features, concat_ffn.gate_proj.in_features
@@ -691,51 +1179,6 @@ def merge_qwen_moe_by_activation_matching_within_and_across_models(
     
     handle.remove()
     del handle, forwarded_hidden_states
-
-    # Modified version for moving data to cpu
-    """
-    activations_dict = {}
-    handles = []
-    def get_hook(name):
-        def _activation_hook(module, input, output):
-            # activations.append(input[0].detach().reshape(-1, input[0].shape[-1]))
-            activations_dict[name].append(input[0].detach().cpu().reshape(-1, input[0].shape[-1]))
-        return _activation_hook
-    
-    # handle = concat_ffn.down_proj.register_forward_hook(_activation_hook)
-
-    print(f"Collect activations with batch size {mini_batch_size} with original data length {forwarded_hidden_states.shape[0]}")
-    randperm_indices = torch.randperm(forwarded_hidden_states.shape[0])
-    forwarded_hidden_states = forwarded_hidden_states[randperm_indices[:10000]] # forwarded_hidden_states.shape[0] // 40
-    forwarded_hidden_states = forwarded_hidden_states.cuda()
-
-    for ffn_idx, ffn in enumerate(ffn_list):
-        ffn = ffn.to(forwarded_hidden_states.device)
-        activations_dict[ffn_idx] = []
-        handles.append(ffn.down_proj.register_forward_hook(get_hook(ffn_idx)))
-
-    
-    with torch.no_grad():
-        for i in range(0, forwarded_hidden_states.shape[0], mini_batch_size):
-            # concat_ffn(forwarded_hidden_states[i:i + mini_batch_size])
-            for ffn_idx, ffn in enumerate(ffn_list):
-                ffn(forwarded_hidden_states[i:i + mini_batch_size])
-
-    for handle in handles:
-        handle.remove()
-    del handles, forwarded_hidden_states
-
-    activations = []
-    for i in range(len(activations_dict[0])):
-        concat_tensor = torch.cat([activations_dict[k][i] for k in range(len(activations_dict))], dim=1)
-        activations.append(concat_tensor)
-
-    activations = torch.cat(activations, dim=0)  # (batch_size * seq_len, d_ff * num_ffn)
-    del activations_dict
-    for ffn in ffn_list:
-        ffn = ffn.cpu()
-    print("activations: ", activations.shape)
-    """
 
     activations = torch.cat(activations, dim=0)  # (batch_size * seq_len, d_ff * num_ffn)
 
@@ -812,23 +1255,32 @@ def merge_qwen_moe_by_activation_matching_within_and_across_models(
 
     return merged_ffn
 
+
 @torch.no_grad()
 def _merge_moe_experts_within_and_across_models(
         moe: Qwen2MoeSparseMoeBlock,
         group_labels: torch.LongTensor,
         forwarded_hidden_states: Tuple[torch.Tensor],
         dominant_alone: bool,
+        merge: str,
         mode: Optional[str] = "normal",
         core_expert_indices: Optional[List[int]] = None,
         usage_frequencies: Optional[torch.Tensor] = None,
+        moe_scores: Optional[torch.Tensor] = None,
+        data_limit: Optional[int] = 50000,
 ) -> Qwen2MoeSparseMoeBlock:
 
     # moe.expert_dict = {}
     input_weight = None
+    if merge == "unmerge":
+        moe = Qwen2MoEWrapper(moe)
+    print("core_expert_indices: ", core_expert_indices)
+
 
     for label in group_labels.unique():
         expert_indices = torch.where(group_labels == label)[0]
         print(f"Group {label}: {expert_indices}")
+        core_expert_index = [i for i, idx in enumerate(expert_indices) if idx in core_expert_indices]
         if mode == "input-weight":
             input_weight = []
             for expert_idx in expert_indices:
@@ -838,33 +1290,90 @@ def _merge_moe_experts_within_and_across_models(
             print(f"Input weight: {input_weight}")
             # input_weight /= sum(input_weight)
 
+        _device = moe.model.experts[0].gate_proj.weight.device
+        _dtype = moe.model.experts[0].gate_proj.weight.dtype
         # not dominant
         group_forwarded_hidden_states = torch.cat([
             forwarded_hidden_states[expert_idx] for expert_idx in expert_indices
         ], dim=0)
+        if data_limit != 1000000:
+            randperm_indices = torch.randperm(group_forwarded_hidden_states.shape[0])
+            group_forwarded_hidden_states = group_forwarded_hidden_states[randperm_indices[:data_limit]]
         if len(expert_indices) == 1:
-            merged_expert = moe.experts[expert_indices[0]]
+            if merge == "unmerge":
+                merged_expert = moe.model.experts[expert_indices[0]]
+                moe.unmerge_matrix[label.item()] = None
+            else:
+                merged_expert = moe.experts[expert_indices[0]]
         else:
-            merged_expert = merge_qwen_moe_by_activation_matching_within_and_across_models(
-                ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
-                forwarded_hidden_states=group_forwarded_hidden_states,
-                mini_batch_size=2048,
-                average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
-                input_weight=input_weight,
-            )
-        moe.experts[expert_indices[0]].gate_proj.weight.copy_(merged_expert.gate_proj.weight)
-        moe.experts[expert_indices[0]].down_proj.weight.copy_(merged_expert.down_proj.weight)
-        moe.experts[expert_indices[0]].up_proj.weight.copy_(merged_expert.up_proj.weight)
+            if merge == "kl-weight":
+                merged_expert = _merge_qwen_moe_by_knowledge_weight(
+                    ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                    knowledge_weight=moe_scores[expert_indices],
+                )
+            elif merge == "update":
+                merged_expert = _merge_qwen_moe_by_zipit(
+                    ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                    forwarded_hidden_states=group_forwarded_hidden_states,
+                    mini_batch_size=5000,
+                    average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                    input_weight=input_weight,
+                )
+            elif merge == "fix-dom":
+                merged_expert = _merge_qwen_moe_experts_with_dominant(
+                    ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                    forwarded_hidden_states=group_forwarded_hidden_states,
+                    mini_batch_size=5000,
+                    average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                    input_weight=input_weight,
+                    dominant_index=core_expert_index[0],
+                )
+            elif merge == "fix-dom-same":
+                merged_expert = _merge_qwen_moe_experts_with_dominant_same_rule(
+                    ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                    forwarded_hidden_states=group_forwarded_hidden_states,
+                    mini_batch_size=5000,
+                    average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                    input_weight=input_weight,
+                    dominant_index=core_expert_index[0],
+                )
+            elif merge == "unmerge":
+                merged_expert, unmerge_matrix = _merge_qwen_moe_by_zipit_with_unmerge(
+                    ffn_list=[moe.model.experts[expert_idx] for expert_idx in expert_indices],
+                    forwarded_hidden_states=group_forwarded_hidden_states,
+                    mini_batch_size=5000,
+                    average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                    input_weight=input_weight,
+                )
+                moe.unmerge_matrix[label.item()] = unmerge_matrix.to(_device).to(_dtype)
+            else:
+                merged_expert = _merge_qwen_moe_by_activation_matching_within_and_across_models(
+                    ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                    forwarded_hidden_states=group_forwarded_hidden_states,
+                    mini_batch_size=2048,
+                    average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                    input_weight=input_weight,
+                )
+        
+        if merge == "unmerge":
+            moe.model.experts[expert_indices[0].item()].gate_proj.weight.copy_(merged_expert.gate_proj.weight)
+            moe.model.experts[expert_indices[0].item()].down_proj.weight.copy_(merged_expert.down_proj.weight)
+            moe.model.experts[expert_indices[0].item()].up_proj.weight.copy_(merged_expert.up_proj.weight)
+            moe.expert_to_group[expert_indices[0].item()] = label.item()
+            moe.group_to_expert[label.item()] = [expert_indices[0].item()]
+            for expert_idx in expert_indices[1:]:
+                moe.model.experts[expert_idx.item()] = moe.model.experts[expert_indices[0].item()]
+                moe.expert_to_group[expert_idx.item()] = label.item()
+                moe.group_to_expert[label.item()].append(expert_idx.item())
+            moe.group_to_expert[label.item()] = torch.tensor(moe.group_to_expert[label.item()])
+        else:
+            moe.experts[expert_indices[0]].gate_proj.weight.copy_(merged_expert.gate_proj.weight)
+            moe.experts[expert_indices[0]].down_proj.weight.copy_(merged_expert.down_proj.weight)
+            moe.experts[expert_indices[0]].up_proj.weight.copy_(merged_expert.up_proj.weight)
 
-        # moe.expert_dict[expert_indices[0].item()] = expert_indices[0].item()
-
-        for expert_idx in expert_indices[1:]:
-            # Binding merged experts to the first of them
-            moe.experts[expert_idx] = moe.experts[expert_indices[0]]
-            # moe.expert_dict[expert_idx.item()] = expert_indices[0].item()
-            # moe.experts[expert_idx.item()] = None
-    # print(moe.expert_dict)
-    # moe.forward = MethodType(merged_qwen2moe_forward, moe)
+            for expert_idx in expert_indices[1:]:
+                # Binding merged experts to the first of them
+                moe.experts[expert_idx] = moe.experts[expert_indices[0]]
     return moe
 
 @torch.no_grad()
@@ -898,6 +1407,7 @@ def merge_by_groups_within_and_across_models(
     qwen_model: Qwen2MoeForCausalLM,
     grouper: ExpertsGrouperForQwen2MoE,
     dataloader: DataLoader,
+    merge: str,
     mode: Optional[str] = "normal",
     partition: Optional[int] = 2,
     dominant_alone: Optional[bool] = False,
@@ -953,6 +1463,7 @@ def merge_by_groups_within_and_across_models(
                 sparse_layer_indices,
                 desc=f"[Merging]Merging by groups within and across experts..."
         ):
+            _st = time.time()
             ffn_name = f"model.layers.{layer_idx}.mlp"
             group_labels = grouper.group_state_dict()[ffn_name]
             layer_forwarded_hidden_states = tuple()
@@ -967,7 +1478,6 @@ def merge_by_groups_within_and_across_models(
                                 if expert_idx == ind:
                                     batch_tensor[j] = True
                                     router_weight.append(router_weights[ffn_name][i][j][r])
-                        # router_weight = torch.tensor(router_weight).unsqueeze(1).cpu().to(forwarded_hidden_states[ffn_name][i].dtype)
                         router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i])
                         hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
                     else:
@@ -983,10 +1493,15 @@ def merge_by_groups_within_and_across_models(
                 group_labels=group_labels,
                 forwarded_hidden_states=layer_forwarded_hidden_states,
                 dominant_alone=dominant_alone,
+                merge=merge,
                 mode=mode,
                 core_expert_indices=core_experts[ffn_name] if core_experts is not None else None,
                 usage_frequencies=usage_frequencies[ffn_name] if usage_weighted else None,
+                data_limit=grouper.data_limit,
             )
+            del layer_forwarded_hidden_states
+            hidden_satates_list.clear()
+            print(f"------- Layer {layer_idx} took {time.time() - _st:.2f}s -------\n")
 
     print(grouper.sparse_layer_indices)
     partition_num = len(grouper.sparse_layer_indices) // partition
