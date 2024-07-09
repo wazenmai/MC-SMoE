@@ -48,3 +48,45 @@ def merged_moe_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
     final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
     return final_hidden_states, router_logits
 
+class MoEWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+        self.expert_to_group = {} # expert_idx: group_label
+        self.group_to_expert = {} # group label: [expert idx]
+        self.unmerge_matrix = {} # group label: unmerge matrix for w2
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        if self.model.training and self.model.jitter_noise > 0:
+            hidden_states *= torch.empty_like(hidden_states).uniform_(1.0 - self.jitter_noise, 1.0 + self.jitter_noise)
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        router_logits = self.model.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.model.top_k, dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros((batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
+
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.model.num_experts).permute(2, 1, 0)
+
+        for expert_idx in range(self.model.num_experts):
+            expert_layer = self.model.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx])
+            group_label = self.expert_to_group[expert_idx]
+            if len(self.group_to_expert[group_label]) == 1:
+                group_idx = 0
+            else:
+                group_idx = torch.where(self.group_to_expert[group_label] == expert_idx)[0].item()
+
+            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            if self.unmerge_matrix[group_label] is not None:
+                current_hidden_states = torch.matmul(expert_layer(current_state), self.unmerge_matrix[group_label][:, group_idx * self.model.hidden_dim:(group_idx+1) * self.model.hidden_dim]) * routing_weights[top_x, idx, None]
+            else:
+                current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states, router_logits
+

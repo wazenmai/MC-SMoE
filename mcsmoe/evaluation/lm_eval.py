@@ -1,7 +1,11 @@
+# -*- modified by wazenmai -*-
+# @Time: 2024/07/03
+
 # -*- coding: utf-8 -*-
 # @Author: pingzhili
 # @Time: 2024/2/18
 
+import os
 import json
 import numpy as np
 from pathlib import Path
@@ -90,14 +94,17 @@ def evaluate_fewshot(
 
     if log:
         print(make_table(results))
+        
         if "groups" in results:
             print(make_table(results, "groups"))
     
     if output_path:
-        f = open(output_path, 'a')
+        f = open(output_path, "a")
         print(make_table(results), file=f)
         if "groups" in results:
             print(make_table(results, "groups"), file=f)
-        f.close()
+        f.close() 
+        
+
 
     return results
