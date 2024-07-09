@@ -920,9 +920,10 @@ class ExpertsGrouperForMixtral(object):
                     p.requires_grad_(False)
             experts = model.model.layers[layer_idx].block_sparse_moe.experts
             _device = experts[0].w2.weight.device
+            _dtype = experts[0].w2.weight.dtype
             moe_pred_kl = torch.zeros(self.num_experts, self.d_ff, device=_device)
             moe_rep_kl = torch.zeros(self.num_experts, self.d_ff, device=_device)
-            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16, device=_device)
+            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=_dtype, device=_device)
             moe_masks.requires_grad_(True)
 
             # Zipit variables
@@ -1071,7 +1072,7 @@ class ExpertsGrouperForMixtral(object):
                 most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
                 self._group_state_dict[moe_name][i] = most_similar_group_label
                 group_member_count[most_similar_group_label] += 1
-                group_dict[most_similar_group_label].append(i)
+                group_dict[most_similar_group_label.item()].append(i)
                 print(f"--expert {i} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
                 if group_member_count[self._group_state_dict[moe_name][i]] > self.group_limit:
                     if len(core_expert_indices) == 1 and self.group_limit < self.num_experts:
@@ -1096,18 +1097,8 @@ class ExpertsGrouperForMixtral(object):
                         most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
                         self._group_state_dict[moe_name][unsimilar_idx] = most_similar_group_label
                         group_member_count[most_similar_group_label] += 1
+                        group_dict[most_similar_group_label.item()].append(unsimilar_idx)
                         print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
-                    # set the similarity btw. other expert and core expert of exceed group as -1
-                    # similarity_matrix[:, most_similar_core] = -1
-                    
-                    # Reassign group label
-                    # most_similar_core = core_expert_indices[
-                    #     torch.argmax(similarity_matrix[i, core_expert_indices])
-                    # ]
-                    # print(most_similar_core.item())
-                    # most_similar_group_label = self._group_state_dict[moe_name][most_similar_core]
-                    # self._group_state_dict[moe_name][i] = most_similar_group_label
-                    group_member_count[most_similar_group_label] += 1
             print(f"core expert: {core_experts[moe_name]}")
             
             # STEP: 4. Zipit Merge
@@ -1568,6 +1559,69 @@ def compute_permutation(data, ffn_list, dom_ind):
     permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
     return permutation_matrix
 
+
+@torch.no_grad()
+def _merge_moe_experts_with_dominant_same_rule(
+        ffn_list: List[MixtralBlockSparseTop2MLP],
+        forwarded_hidden_states: torch.Tensor,
+        mini_batch_size: Optional[int] = None,
+        alpha_for_repeated_merging: Optional[float] = 0.1,
+        average_coefs: Optional[List[float]] = None,
+        input_weight: Optional[List[float]] = None,
+        dominant_index: Optional[int] = 0,
+):
+    print("merge: fix-dom-same-rule-without-unmerge")
+    d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
+    num_ffn = len(ffn_list)
+    if input_weight is not None:
+        coef = input_weight
+    elif average_coefs is None:
+        coef = [1.0] * num_ffn
+    elif len(average_coefs) == num_ffn:
+        coef = average_coefs
+    else:
+        coef = [1.0] * num_ffn
+    
+    if dominant_index != 0:
+        ffn_list[0], ffn_list[dominant_index] = ffn_list[dominant_index], ffn_list[0]
+    print("dominant_index: ", dominant_index)
+    _device = ffn_list[0].w1.weight.device
+    _dtype = ffn_list[0].w1.weight.dtype
+    forwarded_hidden_states = forwarded_hidden_states.to(_device)
+    print(f"Data shape: {forwarded_hidden_states.shape}, temp_dim: {d_ff * num_ffn}, target_dim: {d_ff}, dominant_index: {dominant_index}")
+    # Compute Permutation Matrix for w1 and w3
+    permutation_matrix = torch.eye(d_ff, d_ff * num_ffn, dtype=_dtype, device=_device) * coef[0]
+    dom_act = collect_act(forwarded_hidden_states, ffn_list[dominant_index].w1.weight.data, ffn_list[dominant_index].w3.weight.data)
+    group_indexes = []
+    for i in range(num_ffn):
+        if i == dominant_index:
+            continue
+        other_act = collect_act(forwarded_hidden_states, ffn_list[i].w1.weight.data, ffn_list[i].w3.weight.data)
+        corr_matrix = compute_covariance(dom_act, other_act)
+        max_index = torch.argmax(corr_matrix, dim=1)
+        group_indexes.append(max_index)
+    for i in range(d_ff):
+        for j in range(num_ffn - 1):
+            index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (j + 1)
+            permutation_matrix[i, index_in_this_group] = coef[j]
+    permutation_matrix = torch.div(permutation_matrix, torch.sum(permutation_matrix, dim=1, keepdim=True))
+    print(f"first permutation_matrix: {permutation_matrix.shape} {permutation_matrix[0]}")
+    ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=1) # (d_model, d_ff * num_ffn)
+    ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_w1 = torch.matmul(permutation_matrix, ffn_all_w1)
+    ffn_w2 = torch.matmul(permutation_matrix, ffn_all_w2.T)
+    ffn_w3 = torch.matmul(permutation_matrix, ffn_all_w3)
+
+    del ffn_all_w1, ffn_all_w2, ffn_all_w3
+
+    merged_ffn = deepcopy(ffn_list[0])
+    merged_ffn.w1.weight.data = ffn_w1
+    merged_ffn.w2.weight.data = ffn_w2.T
+    merged_ffn.w3.weight.data = ffn_w3
+
+    return merged_ffn
+
 @torch.no_grad()
 def _merge_moe_experts_with_dominant(
         ffn_list: List[MixtralBlockSparseTop2MLP],
@@ -1578,6 +1632,7 @@ def _merge_moe_experts_with_dominant(
         input_weight: Optional[List[float]] = None,
         dominant_index: Optional[int] = 0,
 ):
+    print("merge: fix-dom-independent-rule-without-unmerge")
     d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
     num_ffn = len(ffn_list)
     need_pinv = False
@@ -1674,6 +1729,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     average_coefs: Optional[List[float]] = None,
     input_weight: Optional[List[float]] = None,
 ) -> MixtralBlockSparseTop2MLP:
+    print("merge: zipit-same-rule-without-unmerge")
     ffn_list = [ffn.eval() for ffn in ffn_list]
     concat_ffn = deepcopy(ffn_list[0])
     d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
@@ -1698,9 +1754,9 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
         mini_batch_size = forwarded_hidden_states.shape[0]
 
     _device = concat_ffn.w1.weight.device
-    ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0)
-    ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=1)
-    ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0)
+    ffn_all_w1 = torch.cat([ffn.w1.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
+    ffn_all_w2 = torch.cat([ffn.w2.weight.data for ffn in ffn_list], dim=1) # (d_model, d_ff * num_ffn)
+    ffn_all_w3 = torch.cat([ffn.w3.weight.data for ffn in ffn_list], dim=0) # (d_ff * num_ffn, d_model)
     concat_ffn.w1 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
     concat_ffn.w2 = torch.nn.Linear(d_ff * num_ffn, d_model, bias=False)
     concat_ffn.w3 = torch.nn.Linear(d_model, d_ff * num_ffn, bias=False)
@@ -1899,6 +1955,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models_with_unme
     average_coefs: Optional[List[float]] = None,
     input_weight: Optional[List[float]] = None,
 ) -> MixtralBlockSparseTop2MLP:
+    print("merge: zipit-independe-rule-with-unmerge")
     ffn_list = [ffn.eval() for ffn in ffn_list]
     d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
     num_ffn = len(ffn_list)
@@ -2119,6 +2176,15 @@ def _merge_moe_experts_within_and_across_models(
                     )
                 elif merge == "fix-dom":
                     merged_expert = _merge_moe_experts_with_dominant(
+                        ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                        forwarded_hidden_states=group_forwarded_hidden_states,
+                        mini_batch_size=5000,
+                        average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                        input_weight=input_weight,
+                        dominant_index=core_expert_index[0],
+                    )
+                elif merge == "fix-dom-same":
+                    merged_expert = _merge_moe_experts_with_dominant_same_rule(
                         ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
                         forwarded_hidden_states=group_forwarded_hidden_states,
                         mini_batch_size=5000,
