@@ -486,7 +486,7 @@ class ExpertsGrouperForQwen2MoE(object):
                 routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
                 routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
                 router_indices.append(selected_experts)
-                if mode == "activation-with-router-logits":
+                if mode == "activation-with-router-logits" or mode == "all":
                     router_weights.append(routing_weights)
                 expert_index = selected_experts[att_mask]
                 del routing_weights, selected_experts
@@ -589,7 +589,7 @@ class ExpertsGrouperForQwen2MoE(object):
                 hidden_states_list = []
                 for i in range(len(dataloader)): # batch of data
                     batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[i]))])
-                    if mode == "activation-with-router-logits":
+                    if mode == "activation-with-router-logits" or mode == "all":
                         router_weight = []
                         for j in range(len(forwarded_hidden_states[i])): # one token
                             for r, ind in enumerate(router_indices[i][j]): # token's router-logits and expert-index
@@ -1281,7 +1281,7 @@ def _merge_moe_experts_within_and_across_models(
         expert_indices = torch.where(group_labels == label)[0]
         print(f"Group {label}: {expert_indices}")
         core_expert_index = [i for i, idx in enumerate(expert_indices) if idx in core_expert_indices]
-        if mode == "input-weight":
+        if mode == "input-weight" or mode == "all":
             input_weight = []
             for expert_idx in expert_indices:
                 input_weight.append(forwarded_hidden_states[expert_idx].shape[0])
@@ -1441,7 +1441,7 @@ def merge_by_groups_within_and_across_models(
             )
         
         router_indices = {name: [] for name in forwarded_hidden_states.keys()}
-        if mode == "activation-with-router-logits":
+        if mode == "activation-with-router-logits" or mode == "all":
             router_weights = {name: [] for name in forwarded_hidden_states.keys()}
         with torch.no_grad():
             for batch in tqdm(dataloader, desc="[Merging]Computing activations..."):
@@ -1452,7 +1452,7 @@ def merge_by_groups_within_and_across_models(
                     routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1, dtype=torch.float)
                     routing_weights, selected_experts = torch.topk(routing_weights, qwen_model.config.num_experts_per_tok, dim=-1)
                     router_indices[ffn_name].append(selected_experts)
-                    if mode == "activation-with-router-logits":
+                    if mode == "activation-with-router-logits" or "mode" == "all":
                         router_weights[ffn_name].append(routing_weights)
                         
         for handle in handles:
@@ -1471,7 +1471,7 @@ def merge_by_groups_within_and_across_models(
                 hidden_states_list = []
                 for i in range(len(dataloader)): # batch of data
                     batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[ffn_name][i]))])
-                    if mode == "activation-with-router-logits":
+                    if mode == "activation-with-router-logits" or mode == "all":
                         router_weight = []
                         for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
                             for r, ind in enumerate(router_indices[ffn_name][i][j]): # token's router-logits and expert-index
