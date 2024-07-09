@@ -169,6 +169,7 @@ class KPruner(object):
             # global collect all unpruned layers core to get gloabl mask
             routing_weights = F.softmax(router_logits[layer_idx], dim=-1, dtype=torch.float)
             routing_weights, selected_experts = torch.topk(routing_weights, self.topk, dim=-1)
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
             if self.reconstruct:
                 router_logits_rc.append(routing_weights.to(_device))
                 expert_index_rc.append(selected_experts.to(_device))
@@ -377,7 +378,7 @@ class KPruner(object):
         #         experts[e].w2.weight[dim:dim + self.reconstruct_batch_size] = W_new[:, e * left_neurons : (e + 1) * left_neurons]
         
         print(f"[Pruning] Time: {time.time() - _st:.2f}s")
-        print(torch.cuda.memory_summary())
+        # print(torch.cuda.memory_summary())
 
     
     def kprune_for_mixtral(
