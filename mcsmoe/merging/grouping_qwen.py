@@ -523,6 +523,11 @@ class ExpertsGrouperForQwen2MoE(object):
                 routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
                 router_indices.append(selected_experts)
                 if mode == "activation-with-router-logits" or mode == "all":
+                     if hasattr(model.config, "norm_topk_prob"):
+                        if model.config.norm_topk_prob:
+                            routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+                    else:
+                        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
                     router_weights.append(routing_weights)
                 expert_index = selected_experts[att_mask]
                 del routing_weights, selected_experts
@@ -619,25 +624,19 @@ class ExpertsGrouperForQwen2MoE(object):
             # STEP: 4. Zipit Merge
             group_labels = self._group_state_dict[moe_name]
             layer_forwarded_hidden_states = tuple()
+            router_weights = torch.cat(router_weights, dim=0) # BT x k
+            router_indices = torch.cat(router_indices, dim=0) # BT x k
+            forwarded_hidden_states = torch.cat(forwarded_hidden_states, dim=0) # T x D
             for e in range(self.num_experts):
-                hidden_states_list = []
-                for i in range(len(dataloader)): # batch of data
-                    batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[i]))])
-                    if mode == "activation-with-router-logits" or mode == "all":
-                        router_weight = []
-                        for j in range(len(forwarded_hidden_states[i])): # one token
-                            for r, ind in enumerate(router_indices[i][j]): # token's router-logits and expert-index
-                                if e == ind:
-                                    batch_tensor[j] = True
-                                    router_weight.append(router_weights[i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[i].dtype) # .cpu()
-                        hidden_states_list.append(forwarded_hidden_states[i][batch_tensor] * router_weight)
-                    else:
-                        for j in range(len(forwarded_hidden_states[i])): # one token
-                            if e in router_indices[i][j]:
-                                batch_tensor[j] = True
-                        hidden_states_list.append(forwarded_hidden_states[i][batch_tensor])
-                layer_forwarded_hidden_states += (torch.cat(hidden_states_list, dim=0),)
+                expert_mask = (router_indices == expert_idx)
+                batch_tensor = torch.any(expert_mask, dim=-1).to(forwarded_hidden_states.device)
+                choice_input = forwarded_hidden_states[batch_tensor]
+                if mode == "activation-with-router-logits" or mode == "all":
+                    router_weight = torch.masked_select(router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    hidden_states = choice_input * router_weight
+                else:
+                    hidden_states = choice_input
+                layer_forwarded_hidden_states += (hidden_states,)
             model.model.layers[layer_idx].mlp = _merge_moe_experts_within_and_across_models(
                 moe=moe,
                 group_labels=group_labels,

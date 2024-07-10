@@ -187,3 +187,5 @@ mcsmoe/data/c4-train.00000-of-01024.json
 *.pt
 *-log
 temp/
+results/
+scripts/tinyllama/

@@ -342,10 +342,15 @@ class ExpertsGrouperForMixtral(object):
         for name, p in model.named_parameters():
             if p.requires_grad_:
                 p.requires_grad_(False)
+        
+        moe = model.model.layers[self.sparse_layer_indices[0]].block_sparse_moe
+        experts = moe.experts
+        _device = experts[0].w2.weight.device
+        _dtype = experts[0].w2.weight.dtype
         num_sparse_layer = len(self.sparse_layer_indices)
-        moe_pred_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff).cuda()
-        moe_rep_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff).cuda()
-        moe_masks = torch.ones(num_sparse_layer, self.num_experts, self.d_ff, dtype=torch.float16).cuda()
+        moe_pred_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff, dtype=_dtype, device=_device)
+        moe_rep_kl = torch.zeros(num_sparse_layer, self.num_experts, self.d_ff, dtype=_dtype, device=_device)
+        moe_masks = torch.ones(num_sparse_layer, self.num_experts, self.d_ff, dtype=_dtype, device=_device)
         moe_masks.requires_grad_(True)
 
         handles = []
@@ -415,7 +420,7 @@ class ExpertsGrouperForMixtral(object):
 
             # Measure amount of knowledge
             for i, layer_idx in enumerate(self.sparse_layer_indices):
-                routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+                routing_weights = F.softmax(router_logits[layer_idx], dim=1)
                 routing_weights, selected_experts = torch.topk(routing_weights, self.topk, dim=-1)
                 # print(f"selected_experts: {selected_experts.shape} {selected_experts}")
                 expert_index = selected_experts[att_mask]
@@ -470,6 +475,7 @@ class ExpertsGrouperForMixtral(object):
         moe = model.model.layers[layer_idx].block_sparse_moe
         experts = moe.experts
         _device = experts[0].w2.weight.device
+        _dtype = experts[0].w2.weight.dtype
 
         if kd_labels is None:
             kd_labels = []
@@ -478,7 +484,7 @@ class ExpertsGrouperForMixtral(object):
         
         moe_pred_kl = torch.zeros(self.num_experts, self.d_ff, device=_device)
         moe_rep_kl = torch.zeros(self.num_experts, self.d_ff, device=_device)
-        moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16, device=_device)
+        moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=_dtype, device=_device)
         moe_masks.requires_grad_(True)
 
         ## 2. Register hook function
@@ -535,7 +541,7 @@ class ExpertsGrouperForMixtral(object):
             kl_div.backward()
 
             router_logits = outputs.router_logits
-            routing_weights = F.softmax(router_logits[layer_idx], dim=-1, dtype=torch.float)
+            routing_weights = F.softmax(router_logits[layer_idx], dim=-1)
             routing_weights, selected_experts = torch.topk(routing_weights, self.topk, dim=-1) # BTxk
             expert_mask = F.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0) # ExkxBT
              # predictive knowledge
@@ -790,7 +796,7 @@ class ExpertsGrouperForMixtral(object):
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[Merging]Computing similarities by expert-inputs.abs..."):
             moe_name = f"model.layers.{layer_idx}.block_sparse_moe"
             # router index of shape (batch_size*sequence_length)
-            routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+            routing_weights = F.softmax(router_logits[layer_idx], dim=1)
             routing_weights, router_expert_index = torch.topk(routing_weights, model.config.num_experts_per_tok, dim=-1)
             # features of shape (batch_size*sequence_length, hidden_size)
             features = self.activations[moe_name]
@@ -969,10 +975,15 @@ class ExpertsGrouperForMixtral(object):
                 # torch.cuda.memory._dump_snapshot(f"snapshot_{num_samples}.pickle")
 
                 # Measure amount of knowledge
-                routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+                routing_weights = F.softmax(router_logits[layer_idx], dim=1)
                 routing_weights, selected_experts = torch.topk(routing_weights, model.config.num_experts_per_tok, dim=-1)
                 router_indices.append(selected_experts)
                 if mode == "activation-with-router-logits" or mode == "all":
+                    if hasattr(model.config, "norm_topk_prob"):
+                        if model.config.norm_topk_prob:
+                            routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+                    else:
+                        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
                     router_weights.append(routing_weights)
                 expert_index = selected_experts[att_mask]
                 del routing_weights, selected_experts
@@ -1084,27 +1095,19 @@ class ExpertsGrouperForMixtral(object):
             # STEP: 4. Zipit Merge
             group_labels = self._group_state_dict[moe_name]
             layer_forwarded_hidden_states = tuple()
+            router_weights = torch.cat(router_weights, dim=0) # BT x k
+            router_indices = torch.cat(router_indices, dim=0) # BT x k
+            forwarded_hidden_states = torch.cat(forwarded_hidden_states, dim=0) # T x D
             for expert_idx in range(self.num_experts): # expert num
-                hidden_states_list = []
-                for i in range(len(dataloader)): # batch of data
-                    batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[i]))])
-                    if mode == "activation-with-router-logits" or mode == "all":
-                        router_weight = []
-                        for j in range(len(forwarded_hidden_states[i])): # one token
-                            for r, ind in enumerate(router_indices[i][j]): # token's router-logits and expert-index
-                                if expert_idx == ind:
-                                    batch_tensor[j] = True
-                                    router_weight.append(router_weights[i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[i].dtype) # .cpu()
-                        hidden_states_list.append(forwarded_hidden_states[i][batch_tensor] * router_weight)
-                    else:
-                        for j in range(len(forwarded_hidden_states[i])): # one token
-                            if expert_idx in router_indices[i][j]:
-                                batch_tensor[j] = True
-                        hidden_states_list.append(forwarded_hidden_states[i][batch_tensor])
-                layer_forwarded_hidden_states += (
-                    torch.cat(hidden_states_list, dim=0),
-                )
+                expert_mask = (router_indices == expert_idx)
+                batch_tensor = torch.any(expert_mask, dim=-1).to(forwarded_hidden_states.device)
+                choice_input = forwarded_hidden_states[batch_tensor]
+                if mode == "activation-with-router-logits" or mode == "all":
+                    router_weight = torch.masked_select(router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    hidden_states = choice_input * router_weight
+                else:
+                    hidden_states = choice_input
+                layer_forwarded_hidden_states += (hidden_states,)
             model.model.layers[layer_idx].block_sparse_moe = _merge_moe_experts_within_and_across_models(
                 moe=model.model.layers[layer_idx].block_sparse_moe,
                 group_labels=group_labels,
@@ -1146,15 +1149,20 @@ class ExpertsGrouperForMixtral(object):
         for layer_idx in self.sparse_layer_indices:
             moe_name = f"model.layers.{layer_idx}.block_sparse_moe"
             print(f"[Process-Start] ---------------- Layer {layer_idx} / {len(self.sparse_layer_indices)} ---------------- ")
-            
+
+            moe = model.model.layers[layer_idx].block_sparse_moe
+            experts = moe.experts
+            _device = experts[0].w2.weight.device
+            _dtype = experts[0].w2.weight.dtype
+
             # 1. Compute knowledge
 
             model.eval() # .cuda()
             for name, p in model.named_parameters():
                 p.requires_grad_(False)
-            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-            moe_rep_kl = torch.zeros(self.num_experts, self.d_ff).to(model.device)
-            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=torch.float16).to(model.device)
+            moe_pred_kl = torch.zeros(self.num_experts, self.d_ff, dtype=_dtype, device=_device)
+            moe_rep_kl = torch.zeros(self.num_experts, self.d_f, dtype=_dtype, device=_device)
+            moe_masks = torch.ones(self.num_experts, self.d_ff, dtype=_dtype, device=_device)
             moe_masks.requires_grad_(True)
 
             handles = []
@@ -1203,7 +1211,7 @@ class ExpertsGrouperForMixtral(object):
                 kl_div.backward()
 
                 del outputs, pred, kl_div
-                routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+                routing_weights = F.softmax(router_logits[layer_idx], dim=1)
                 routing_weights, selected_experts = torch.topk(routing_weights, model.config.num_experts_per_tok, dim=-1)
                 expert_index = selected_experts[att_mask]
                 del routing_weights, selected_experts
@@ -1248,8 +1256,8 @@ class ExpertsGrouperForMixtral(object):
             # 3. Group experts by similarity -> one group two experts
             for i in range(self.num_experts):
                 for j in range(i + 1, self.num_experts):
-                    i_flat = torch.tensor([0 if pruning_mask[i][k] == False else 1 for k in range(self.d_ff)], dtype=torch.float)
-                    j_flat = torch.tensor([0 if pruning_mask[i][j] == False else 1 for k in range(self.d_ff)], dtype=torch.float)
+                    i_flat = torch.tensor([0 if pruning_mask[i][k] == False else 1 for k in range(self.d_ff)], dtype=_dtype)
+                    j_flat = torch.tensor([0 if pruning_mask[i][j] == False else 1 for k in range(self.d_ff)], dtype=_dtype)
                     similarity = self.similarity_fn(i_flat, j_flat)
                     self.save_similarity(moe_name, i, j, -similarity) # different -> merge
             
@@ -1399,7 +1407,7 @@ def remove_row(x, idx):
 
 @torch.no_grad()
 def _zipit_merge(temp_dim, target_dim, weight1, weight3, data,):
-    permutation_matrix = torch.eye(temp_dim, temp_dim).to(torch.float16)
+    permutation_matrix = torch.eye(temp_dim, temp_dim).to(weight1.dtype)
     ROUND = 0
     act = torch.nn.SiLU()
     while temp_dim > target_dim:
@@ -1532,7 +1540,7 @@ def compute_permutation(data, ffn_list, dom_ind):
         max_index = torch.argmax(corr_matrix, dim=1)
         group_indexes.append(max_index)
     
-    permutation_matrix = torch.eye(d_ff, temp_dim).to(_device).to(torch.float16)
+    permutation_matrix = torch.eye(d_ff, temp_dim).to(_device).to(data.dtype)
     for i in range(d_ff):
         for j in range(corr_matrix.shape[1]):
             index_in_this_group = (group_indexes[j] == i).nonzero().squeeze() + d_ff * (i + 1)
@@ -1809,6 +1817,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models_same_rule
 
     corr_matrix[torch.arange(d_ff * num_ffn), torch.arange(d_ff * num_ffn)] = -1  # Remove self-correlation
     print(f"corr_matrix: {corr_matrix.shape}")
+    permutation_matrix = torch.eye(d_ff * num_ffn, d_ff * num_ffn, device=_device, dtype=ffn_all_w1.dtype)
 
     # Greedy Merging!
     while ffn_all_w1.shape[0] > d_ff:
@@ -1822,6 +1831,8 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models_same_rule
         ffn_all_w3[max_i] = (i_coef * ffn_all_w3[max_i] + j_coef * ffn_all_w3[max_j]) / (i_coef + j_coef + FP32_EPS)
         ffn_all_w2[:, max_i] = (i_coef * ffn_all_w2[:, max_i] + j_coef * ffn_all_w2[:, max_j]) / (
                 i_coef + j_coef + FP32_EPS)
+        permutation_matrix[:, max_i] += permutation_matrix[:, max_j]
+        permutation_matrix = remove_col(permutation_matrix, max_j)
        
         # Remove the second feature
         ffn_all_w1 = torch.cat([
@@ -1859,18 +1870,34 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models_same_rule
         average_coefs[max_i] += average_coefs[max_j]
         average_coefs = average_coefs[:max_j] + average_coefs[max_j + 1:]
 
+    permutation_matrix = permutation_matrix / torch.sum(permutation_matrix, dim=0, keepdim=True) # 3N x N
+    print(f"permutation_matrix: {permutation_matrix.shape} {permutation_matrix}")
+    unmerge_matrix = torch.linalg.pinv(permutation_matrix.to(torch.float)).to(ffn_all_w1.dtype)  # N x 3N
+    print(f"unmerge_matrix: {unmerge_matrix.shape} {unmerge_matrix}")
+
+    print(f"original ffn w1: {ffn_all_w1.shape} {ffn_all_w1}")
+    print(f"original ffn w2: {ffn_all_w2.shape} {ffn_all_w2}")
+    print(f"original ffn w3: {ffn_all_w3.shape} {ffn_all_w3}")
+
+    ffn_w1 = torch.zeros(d_model, d_ff, dtype=ffn_all_w1.dtype, device=_device)
+    ffn_w3 = torch.zeros(d_model, d_ff, dtype=ffn_all_w3.dtype, device=_device)
+    ffn_w2 = torch.zeros(d_model, d_ff, dtype=ffn_all_w2.dtype, device=_device)
+    for i in range(num_ffn):
+        ffn_w1 += torch.matmul(ffn_list[i].w1.weight.data.T, torch.matmul(permutation_matrix[i * d_ff:(i + 1) * d_ff], unmerge_matrix[:, i * d_ff:(i + 1) * d_ff]))
+        ffn_w3 += torch.matmul(ffn_list[i].w3.weight.data.T, torch.matmul(permutation_matrix[i * d_ff:(i + 1) * d_ff], unmerge_matrix[:, i * d_ff:(i + 1) * d_ff]))
+        ffn_w2 += torch.matmul(ffn_list[i].w2.weight.data, torch.matmul(permutation_matrix[i * d_ff:(i + 1) * d_ff], unmerge_matrix[:, i * d_ff:(i + 1) * d_ff]))
+
+    print(f"unmerge ffn w1: {ffn_w1.shape} {torch.sum(torch.abs(ffn_all_w1 - ffn_w1.T))} {ffn_w1}")
+    print(f"unmerge ffn w2: {ffn_w2.shape} {torch.sum(torch.abs(ffn_all_w2 - ffn_w2))} {ffn_w2}")
+    print(f"unmerge ffn w3: {ffn_w3.shape} {torch.sum(torch.abs(ffn_all_w3 - ffn_w3.T))} {ffn_w3}")
+
     # handle.remove()
     del corr_matrix
     merged_ffn = deepcopy(ffn_list[0])
    
-    merged_ffn.w1.weight.data = ffn_all_w1
-    merged_ffn.w2.weight.data = ffn_all_w2
-    merged_ffn.w3.weight.data = ffn_all_w3
-
-    # for ffn in ffn_list:
-    #     del ffn
-
-    # del ffn_all_w1, ffn_all_w2, ffn_all_w3, ffn_list
+    merged_ffn.w1.weight.data = ffn_w1.T
+    merged_ffn.w2.weight.data = ffn_w2
+    merged_ffn.w3.weight.data = ffn_w3.T
 
     return merged_ffn
 
@@ -1984,6 +2011,8 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
     corr_matrix[torch.arange(d_ff * num_ffn), torch.arange(d_ff * num_ffn)] = -1  # Remove self-correlation
     print(f"corr_matrix: {corr_matrix.shape}")
 
+    permutation_matrix = torch.eye(d_ff * num_ffn, d_ff * num_ffn, device=_device, dtype=ffn_all_w1.dtype)
+
     # Greedy Merging!
     while ffn_all_w1.shape[0] > d_ff:
         # Select the most correlated pair
@@ -1996,6 +2025,8 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
         ffn_all_w3[max_i] = (i_coef * ffn_all_w3[max_i] + j_coef * ffn_all_w3[max_j]) / (i_coef + j_coef + FP32_EPS)
         ffn_all_w2[:, max_i] = (i_coef * ffn_all_w2[:, max_i] + j_coef * ffn_all_w2[:, max_j]) / (
                 i_coef + j_coef + FP32_EPS)
+        permutation_matrix[:, max_i] += permutation_matrix[:, max_j]
+        permutation_matrix = remove_col(permutation_matrix, max_j)
        
         # Remove the second feature
         ffn_all_w1 = torch.cat([
@@ -2032,7 +2063,9 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
         # Update the average coefs
         average_coefs[max_i] += average_coefs[max_j]
         average_coefs = average_coefs[:max_j] + average_coefs[max_j + 1:]
-
+    permutation_matrix = permutation_matrix / torch.sum(permutation_matrix, dim=0, keepdim=True) # 3N x N
+    for i in range(permutation_matrix.shape[1]): # permutation_matrix.shape[1]
+        print(permutation_matrix[:, i].nonzero().squeeze())
     # handle.remove()
     del corr_matrix
     merged_ffn = deepcopy(ffn_list[0])
@@ -2179,7 +2212,7 @@ def _merge_mixtral_moe_by_knowledge_weight(
 ) -> MixtralBlockSparseTop2MLP:
     d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
     num_ffn = len(ffn_list)
-    
+
     col_sum = knowledge_weight.sum(dim=0, keepdim=True)
     knowledge_weight = (knowledge_weight / col_sum)
     knowledge = knowledge_weight.reshape(1, -1) # (ExN) -> (1xEN)
@@ -2356,13 +2389,22 @@ def _merge_moe_experts_within_and_across_models(
                     )
                     moe.unmerge_matrix[label.item()] = unmerge_matrix.to(moe.model.experts[0].w1.weight.device).to(torch.bfloat16)
                 else: # zipit-normal, activation-with-router-logits, input-weight
-                    merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
-                        ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
-                        forwarded_hidden_states=group_forwarded_hidden_states,
-                        mini_batch_size=5000,
-                        average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
-                        input_weight=input_weight,
-                    )
+                    if mode == "unmerge":
+                        merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models_same_rule_with_unmerge(
+                            ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                            forwarded_hidden_states=group_forwarded_hidden_states,
+                            mini_batch_size=5000,
+                            average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                            input_weight=input_weight,
+                        )
+                    else:
+                        merged_expert = _merge_mixtral_moe_by_activation_matching_within_and_across_models(
+                            ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
+                            forwarded_hidden_states=group_forwarded_hidden_states,
+                            mini_batch_size=5000,
+                            average_coefs=usage_frequencies[expert_indices].tolist() if usage_frequencies is not None else None,
+                            input_weight=input_weight,
+                        )
         
         if merge == "unmerge":
             moe.model.experts[expert_indices[0].item()].w1.weight.copy_(merged_expert.w1.weight)
@@ -2424,6 +2466,7 @@ def merge_by_groups_with_usage_weighted(
         ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
         group_labels = group_labels_dict[ffn_name]
         usage_frequencies = usage_frequency_dict[ffn_name]
+        # usage_frequencies = torch.ones(len(usage_frequencies), dtype=usage_frequencies.dtype, device=usage_frequencies.device)
         model.model.layers[layer_idx].block_sparse_moe = _merge_mlp_experts_by_usage_frequency_weighting(
             ffn=model.model.layers[layer_idx].block_sparse_moe,
             group_labels=group_labels,
@@ -2478,7 +2521,7 @@ def merge_by_groups_within_and_across_models(
                 outputs = mixtral_model(**batch, output_router_logits=True)
                 for layer_idx in sparse_layer_indices:
                     ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
-                    routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1, dtype=torch.float)
+                    routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1)
                     routing_weights, selected_experts = torch.topk(routing_weights, mixtral_model.config.num_experts_per_tok, dim=-1)
                     router_indices[ffn_name].append(selected_experts)
                     if mode == "activation-with-router-logits" or mode == "all":
@@ -2560,7 +2603,7 @@ def reconstruct_weight(
 def check(
     mixtral_model,
     dataloader,
-    name
+    file_name
 ):
     teacher_output = dict()
 
@@ -2579,5 +2622,6 @@ def check(
     for batch in dataloader:
         batch = {k: v.cuda() for k, v in batch.items()}
         outputs = mixtral_model(**batch)
-    with open(f"{name}.pkl", "wb") as f:
+    print(len(teacher_output["21"]), teacher_output["21"][0].shape)
+    with open(f"{file_name}.pkl", "wb") as f:
         pickle.dump(teacher_output, f)
