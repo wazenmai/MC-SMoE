@@ -523,6 +523,11 @@ class ExpertsGrouperForQwen2MoE(object):
                 routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
                 router_indices.append(selected_experts)
                 if mode == "activation-with-router-logits" or mode == "all":
+                    if hasattr(model.config, "norm_topk_prob"):
+                        if model.config.norm_topk_prob:
+                            routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+                    else:
+                        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
                     router_weights.append(routing_weights)
                 expert_index = selected_experts[att_mask]
                 del routing_weights, selected_experts
@@ -580,7 +585,6 @@ class ExpertsGrouperForQwen2MoE(object):
             for i in range(0, self.num_experts): # assign group label to left experts
                 if i in core_expert_indices:
                     continue
-            # for i in range(num_groups, self.num_experts):
                 most_similar_core = core_expert_indices[
                     torch.argmax(similarity_matrix[i, core_expert_indices])
                 ]
