@@ -641,10 +641,10 @@ class ExpertsGrouperForMixtral(object):
             model: MixtralForCausalLM,
             dataloader: DataLoader = None
     ):
-        if os.path.exists("similarity.pkl"):
-            with open("similarity.pkl", "rb") as f:
-                self._similarity_state_dict = pickle.load(f)
-            return
+        # if os.path.exists("similarity.pkl"):
+            # with open("similarity.pkl", "rb") as f:
+                # self._similarity_state_dict = pickle.load(f)
+            # return
         similarity_list = ["weight", "router-weight", "router-logits", "expert-output"]
         if self.similarity_base not in similarity_list and dataloader is None:
             raise ValueError(
@@ -663,9 +663,9 @@ class ExpertsGrouperForMixtral(object):
         else:
             raise NotImplementedError
         
-        if not os.path.exists("similarity.pkl"):
-            with open("similarity.pkl", "wb") as f:
-                pickle.dump(self._similarity_state_dict, f)
+        # if not os.path.exists("similarity.pkl"):
+            # with open("similarity.pkl", "wb") as f:
+                # pickle.dump(self._similarity_state_dict, f)
     
     def compute_similarities_layerwise(
         self,
@@ -2163,6 +2163,8 @@ def _merge_moe_experts_within_and_across_models(
                     merged_expert = moe.experts[expert_indices[0]]
             else:
                 if merge == "kl-weight":
+                    temp_scores = moe_scores[expert_indices]
+                    temp_scores = torch.ones(temp_scores.shape, device=temp_scores.device)
                     merged_expert = _merge_mixtral_moe_by_knowledge_weight(
                         ffn_list=[moe.experts[expert_idx] for expert_idx in expert_indices],
                         knowledge_weight=moe_scores[expert_indices],
@@ -2271,6 +2273,7 @@ def merge_by_groups_with_usage_weighted(
         ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
         group_labels = group_labels_dict[ffn_name]
         usage_frequencies = usage_frequency_dict[ffn_name]
+        usage_frequencies = torch.ones(len(usage_frequencies), dtype=usage_frequencies[0].dtype, device=usage_frequencies.device)
         model.model.layers[layer_idx].block_sparse_moe = _merge_mlp_experts_by_usage_frequency_weighting(
             ffn=model.model.layers[layer_idx].block_sparse_moe,
             group_labels=group_labels,
