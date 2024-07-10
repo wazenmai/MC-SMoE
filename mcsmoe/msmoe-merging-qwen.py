@@ -3,6 +3,7 @@
 # @Time: 2024/2/18
 import os
 import gc
+import time
 from typing import Optional
 
 import logging
@@ -61,6 +62,7 @@ def evaluate_mcsmoe(
         )
 
         print(f"[TAMP] Merging into average {num_average_groups} groups...")
+        group_st = time.time()
         grouper = ExpertsGrouperForQwen2MoE(
             config=model.config,
             similarity_base=similarity_base,
@@ -108,7 +110,7 @@ def evaluate_mcsmoe(
         else:
             raise ValueError(f"Unknown dominant type: {dominant}")
         
-
+        print(f"[TAMP] Merging time: {time.time() - group_st:.2f} seconds")
 
         print(f"[TAMP] ========= Grouping results ========= ")
         for name, state in grouper.group_state_dict().items():

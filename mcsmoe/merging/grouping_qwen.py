@@ -585,7 +585,6 @@ class ExpertsGrouperForQwen2MoE(object):
             for i in range(0, self.num_experts): # assign group label to left experts
                 if i in core_expert_indices:
                     continue
-            # for i in range(num_groups, self.num_experts):
                 most_similar_core = core_expert_indices[
                     torch.argmax(similarity_matrix[i, core_expert_indices])
                 ]
