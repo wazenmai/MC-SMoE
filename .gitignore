@@ -186,4 +186,6 @@ try.py
 mcsmoe/data/c4-train.00000-of-01024.json
 *.pt
 *-log
-*.txt
+temp/
+results/
+scripts/tinyllama/

@@ -77,7 +77,7 @@ class Qwen2MoEWrapper(torch.nn.Module):
 
         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.model.num_experts).permute(2, 1, 0)
 
-        for expert_idx in range(self.num_experts):
+        for expert_idx in range(self.model.num_experts):
             expert_layer = self.model.experts[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx])
             group_label = self.expert_to_group[expert_idx]
@@ -90,7 +90,7 @@ class Qwen2MoEWrapper(torch.nn.Module):
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
             if self.unmerge_matrix[group_label] is not None:
-                current_hidden_states = torch.matmul(expert_layer(current_state), self.unmerge_matrix[group_label][:, group_idx * self.model.hidden_dim:(group_idx+1) * self.model.hidden_dim]) * routing_weights[top_x, idx, None]
+                current_hidden_states = torch.matmul(expert_layer(current_state), self.unmerge_matrix[group_label][:, group_idx * hidden_dim:(group_idx+1) * hidden_dim]) * routing_weights[top_x, idx, None]
             else:
                 current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
 

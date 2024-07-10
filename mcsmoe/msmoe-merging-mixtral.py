@@ -127,7 +127,7 @@ def evaluate_mcsmoe(
                 f"Accepted dominant methods are `random`, `frequency` and `knowledge`, but the input is `{dominant}`"
             )
         
-        # check(model, dataloader_for_merging, "zipit")
+        # check(model, dataloader_for_merging, "zipit-hi")
         print(f"[TAMP] Merging time: {time.time() - group_st:2f} seconds")
         
         ### Print grouping results
@@ -153,9 +153,9 @@ def evaluate_mcsmoe(
         print("[TAMP] Number of parameters after merging:", model.num_parameters())
         if num_average_groups < model.config.num_experts_per_tok:
             model.config.num_experts_per_tok = num_average_groups
-        if not os.path.exists(output_path):
-            os.makedirs(output_path)
-        torch.save(model.state_dict(), output_path+"/model.pth")
+        # if not os.path.exists(output_path):
+            # os.makedirs(output_path)
+        # torch.save(model.state_dict(), output_path+"/model.pth")
 
     if eval_ppl:
         evaluate_minipile_perplexity(
