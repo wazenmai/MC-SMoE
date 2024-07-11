@@ -523,7 +523,7 @@ class ExpertsGrouperForQwen2MoE(object):
                 routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
                 router_indices.append(selected_experts)
                 if mode == "activation-with-router-logits" or mode == "all":
-                     if hasattr(model.config, "norm_topk_prob"):
+                    if hasattr(model.config, "norm_topk_prob"):
                         if model.config.norm_topk_prob:
                             routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
                     else:
