@@ -94,6 +94,7 @@ def evaluate_mcsmoe(
                     dataloader=dataloader_for_merging,
                     merge=merge,
                     mode=mode,
+                    partition=partition,
                     core_experts=dom_experts,
                     dominant_alone=False,
                     usage_weighted=False

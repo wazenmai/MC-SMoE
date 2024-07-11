@@ -234,9 +234,13 @@ class ExpertsGrouperForQwen2MoE(object):
                         print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
                         # Find the most unsimilar expert in the exceed group
                         sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
-                        unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
+                        print(sim, group_dict[most_similar_group_label.item()])
+                        unsimilar_pos = torch.argmin(sim).item()
+                        if (unsimilar_pos == 0): # do not let it choose the dominant expert
+                            unsimilar_pos = 1
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][unsimilar_pos]
                     
-                        group_member_count[self._group_state_dict[ffn_name][i]] -= 1
+                        group_member_count[most_similar_group_label] -= 1
                         group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
@@ -248,6 +252,7 @@ class ExpertsGrouperForQwen2MoE(object):
                         most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
                         self._group_state_dict[ffn_name][unsimilar_idx] = most_similar_group_label
                         group_member_count[most_similar_group_label] += 1
+                        group_dict[most_similar_group_label.item()].append(unsimilar_idx)
                         print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
         return dom_experts
 
@@ -400,7 +405,7 @@ class ExpertsGrouperForQwen2MoE(object):
         
         for handle in handles:
             handle.remove()
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[TAMP] Computing similarities by expert outputs..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
@@ -416,7 +421,7 @@ class ExpertsGrouperForQwen2MoE(object):
                         similarity = self.similarity_fn(i_flat, j_flat)
                         self.save_similarity(ffn_name, i, j, similarity)
         
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
     
     def all_in_one_knowledge_dominant(
             self,
@@ -604,8 +609,12 @@ class ExpertsGrouperForQwen2MoE(object):
                         # Find the most unsimilar expert in the exceed group
                         sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
                         unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
-                        
-                        group_member_count[self._group_state_dict[moe_name][i]] -= 1
+                        print(sim, group_dict[most_similar_group_label.item()])
+                        unsimilar_pos = torch.argmin(sim).item()
+                        if (unsimilar_pos == 0): # do not let it choose the dominant expert
+                            unsimilar_pos = 1
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][unsimilar_pos]
+                        group_member_count[most_similar_group_label] -= 1
                         group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
@@ -1470,7 +1479,7 @@ def merge_by_groups_within_and_across_models(
     dataloader: DataLoader,
     merge: str,
     mode: Optional[str] = "normal",
-    partition: Optional[int] = 2,
+    partition: Optional[int] = 1,
     dominant_alone: Optional[bool] = False,
     core_experts: Optional[Dict[str, List[int]]] = None,
     usage_weighted: Optional[bool] = False,

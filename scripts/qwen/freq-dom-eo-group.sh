@@ -4,6 +4,23 @@
 # zipit merge mode: normal, activation-with-router-logits, input-weight, all
 # task: winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte,
 
+# eval
+accelerate launch --config_file static/finetune_config.yaml \
+  --main_process_port 29512 mcsmoe/msmoe-merging-qwen.py \
+  --model_name="Qwen/Qwen1.5-MoE-A2.7B-Chat" \
+  --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
+  --dominant="frequency" \
+  --similarity_base="expert-output" \
+  --merge="no" \
+  --mode="normal" \
+  --num_average_groups=45 \
+  --n_sentences=32 \
+  --train_batch_size=2 \
+  --eval_batch_size=16 \
+  --partition=1 \
+  --result_path="/app/results/results_eval.txt" \
+  --output_path="/app/results/mc-smoe/qwen/merge-45e/eval" |& tee results/log_eval
+
 # zipit
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29512 mcsmoe/msmoe-merging-qwen.py \
@@ -15,7 +32,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="all" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=4 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-expert-output-group-zipit-merge-allweight-group.txt" \
@@ -32,7 +49,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="all" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=4 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-expert-output-group-fix-dom-merge-allweight-group.txt" \
@@ -48,7 +65,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="input-weight" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=4 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-expert-output-group-fix-dom-merge-input-weightweight-group.txt" \
@@ -64,7 +81,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="activation-with-router-logits" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=4 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-expert-output-group-fix-dom-merge-activationweight-group.txt" \
@@ -80,7 +97,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="normal" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=4 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-expert-output-group-fix-dom-mergeweight-group.txt" \
