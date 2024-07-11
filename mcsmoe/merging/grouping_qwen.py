@@ -1527,19 +1527,20 @@ def merge_by_groups_within_and_across_models(
             ffn_name = f"model.layers.{layer_idx}.mlp"
             group_labels = grouper.group_state_dict()[ffn_name]
             layer_forwarded_hidden_states = tuple()
-            router_weights = torch.cat(router_weights, dim=0) # BT x k
-            router_indices = torch.cat(router_indices, dim=0) # BT x k
-            forwarded_hidden_states = torch.cat(forwarded_hidden_states, dim=0) # T x D
-            for e in range(self.num_experts):
-                expert_mask = (router_indices == expert_idx)
-                batch_tensor = torch.any(expert_mask, dim=-1).to(forwarded_hidden_states.device)
-                choice_input = forwarded_hidden_states[batch_tensor]
+            hidden_states = torch.cat(forwarded_hidden_states[ffn_name], dim=0) # T x D
+            concat_router_indices = torch.cat(router_indices[ffn_name], dim=0) # BT x k
+            if mode == "activation-with-router-logits" or mode == "all":
+                concat_router_weights = torch.cat(router_weights[ffn_name], dim=0) # BT x k
+            for expert_idx in range(num_experts): # expert num
+                expert_mask = (concat_router_indices == expert_idx)
+                batch_tensor = torch.any(expert_mask, dim=-1).to(hidden_states.device)
+                choice_input = hidden_states[batch_tensor]
                 if mode == "activation-with-router-logits" or mode == "all":
-                    router_weight = torch.masked_select(router_weights, expert_mask).view(-1, 1).to(choice_input.device)
-                    hidden_states = choice_input * router_weight
+                    router_weight = torch.masked_select(concat_router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    layer_hidden_states = choice_input * router_weight
                 else:
-                    hidden_states = choice_input
-                layer_forwarded_hidden_states += (hidden_states,)
+                    layer_hidden_states = choice_input
+                layer_forwarded_hidden_states += (layer_hidden_states,)
             qwen_model.model.layers[layer_idx].mlp = _merge_moe_experts_within_and_across_models(
                 moe=qwen_model.model.layers[layer_idx].mlp,
                 group_labels=group_labels,
