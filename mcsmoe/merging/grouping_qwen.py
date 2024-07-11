@@ -519,7 +519,7 @@ class ExpertsGrouperForQwen2MoE(object):
                 del outputs, pred, kl_div
                 
                 # Measure amount of knowledge
-                routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+                routing_weights = F.softmax(router_logits[layer_idx], dim=1)
                 routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
                 router_indices.append(selected_experts)
                 if mode == "activation-with-router-logits" or mode == "all":
@@ -623,15 +623,16 @@ class ExpertsGrouperForQwen2MoE(object):
             # STEP: 4. Zipit Merge
             group_labels = self._group_state_dict[moe_name]
             layer_forwarded_hidden_states = tuple()
-            router_weights = torch.cat(router_weights, dim=0) # BT x k
-            router_indices = torch.cat(router_indices, dim=0) # BT x k
             forwarded_hidden_states = torch.cat(forwarded_hidden_states, dim=0) # T x D
+            cat_router_indices = torch.cat(router_indices, dim=0) # BT x k
+            if mode == "activation-with-router-logits" or mode == "all":
+                cat_router_weights = torch.cat(router_weights, dim=0) # BT x k
             for e in range(self.num_experts):
-                expert_mask = (router_indices == expert_idx)
+                expert_mask = (cat_router_indices == e)
                 batch_tensor = torch.any(expert_mask, dim=-1).to(forwarded_hidden_states.device)
                 choice_input = forwarded_hidden_states[batch_tensor]
                 if mode == "activation-with-router-logits" or mode == "all":
-                    router_weight = torch.masked_select(router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    router_weight = torch.masked_select(cat_router_weights, expert_mask).view(-1, 1).to(choice_input.device)
                     hidden_states = choice_input * router_weight
                 else:
                     hidden_states = choice_input
@@ -1509,7 +1510,7 @@ def merge_by_groups_within_and_across_models(
                 outputs = qwen_model(**batch, output_router_logits=True)
                 for layer_idx in sparse_layer_indices:
                     ffn_name = f"model.layers.{layer_idx}.mlp"
-                    routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1, dtype=torch.float)
+                    routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1)
                     routing_weights, selected_experts = torch.topk(routing_weights, qwen_model.config.num_experts_per_tok, dim=-1)
                     router_indices[ffn_name].append(selected_experts)
                     if mode == "activation-with-router-logits" or mode == "all":
@@ -1553,7 +1554,6 @@ def merge_by_groups_within_and_across_models(
                 data_limit=grouper.data_limit,
             )
             del layer_forwarded_hidden_states
-            hidden_states_list.clear()
             print(f"------- Layer {layer_idx} took {time.time() - _st:.2f}s -------\n")
 
     print(grouper.sparse_layer_indices)
