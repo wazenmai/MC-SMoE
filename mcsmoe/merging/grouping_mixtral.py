@@ -1717,7 +1717,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models_same_rule
     average_coefs: Optional[List[float]] = None,
     input_weight: Optional[List[float]] = None,
 ) -> MixtralBlockSparseTop2MLP:
-    print("merge: zipit-same-rule-without-unmerge")
+    print("merge: zipit-same-rule-with-unmerge")
     ffn_list = [ffn.eval() for ffn in ffn_list]
     concat_ffn = deepcopy(ffn_list[0])
     d_ff, d_model = ffn_list[0].w1.out_features, ffn_list[0].w1.in_features
@@ -2064,7 +2064,7 @@ def _merge_mixtral_moe_by_activation_matching_within_and_across_models(
         average_coefs[max_i] += average_coefs[max_j]
         average_coefs = average_coefs[:max_j] + average_coefs[max_j + 1:]
     permutation_matrix = permutation_matrix / torch.sum(permutation_matrix, dim=0, keepdim=True) # 3N x N
-    for i in range(permutation_matrix.shape[1]): # permutation_matrix.shape[1]
+    for i in range(20): # permutation_matrix.shape[1]
         print(permutation_matrix[:, i].nonzero().squeeze())
     # handle.remove()
     del corr_matrix
@@ -2490,6 +2490,7 @@ def merge_by_groups_within_and_across_models(
 ) -> MixtralForCausalLM:
     
     forwarded_hidden_states = dict()
+    print(forwarded_hidden_states)
 
     usage_frequencies = grouper.usage_frequency_state_dict()
     num_experts = grouper.num_experts
@@ -2541,27 +2542,20 @@ def merge_by_groups_within_and_across_models(
             ffn_name = f"model.layers.{layer_idx}.block_sparse_moe"
             group_labels = grouper.group_state_dict()[ffn_name]
             layer_forwarded_hidden_states = tuple()
+            hidden_states = torch.cat(forwarded_hidden_states[ffn_name], dim=0) # T x D
+            concat_router_indices = torch.cat(router_indices[ffn_name], dim=0) # BT x k
+            if mode == "activation-with-router-logits" or mode == "all":
+                concat_router_weights = torch.cat(router_weights[ffn_name], dim=0) # BT x k
             for expert_idx in range(num_experts): # expert num
-                hidden_states_list = []
-                for i in range(len(dataloader)): # batch of data
-                    batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[ffn_name][i]))])
-                    if mode == "activation-with-router-logits" or mode == "all":
-                        router_weight = []
-                        for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-                            for r, ind in enumerate(router_indices[ffn_name][i][j]): # token's router-logits and expert-index
-                                if expert_idx == ind:
-                                    batch_tensor[j] = True
-                                    router_weight.append(router_weights[ffn_name][i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i].dtype).to(forwarded_hidden_states[ffn_name][i].device) # .cpu()
-                        hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
-                    else:
-                        for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-                            if expert_idx in router_indices[ffn_name][i][j]:
-                                batch_tensor[j] = True
-                        hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor])
-                layer_forwarded_hidden_states += (
-                    torch.cat(hidden_states_list, dim=0),
-                )
+                expert_mask = (concat_router_indices == expert_idx)
+                batch_tensor = torch.any(expert_mask, dim=-1).to(hidden_states.device)
+                choice_input = hidden_states[batch_tensor]
+                if mode == "activation-with-router-logits" or mode == "all":
+                    router_weight = torch.masked_select(concat_router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    layer_hidden_states = choice_input * router_weight
+                else:
+                    layer_hidden_states = choice_input
+                layer_forwarded_hidden_states += (layer_hidden_states,)
             mixtral_model.model.layers[layer_idx].block_sparse_moe = _merge_moe_experts_within_and_across_models(
                 moe=mixtral_model.model.layers[layer_idx].block_sparse_moe,
                 group_labels=group_labels,
@@ -2574,7 +2568,6 @@ def merge_by_groups_within_and_across_models(
                 data_limit=grouper.data_limit,
             )
             del layer_forwarded_hidden_states
-            hidden_states_list.clear()
             print(f"------- Layer {layer_idx} took {time.time() - _st:.2f}s -------\n")
 
     

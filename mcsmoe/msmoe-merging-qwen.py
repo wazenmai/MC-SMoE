@@ -43,7 +43,7 @@ def evaluate_mcsmoe(
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = Qwen2MoeForCausalLM.from_pretrained(
         "Qwen/Qwen1.5-MoE-A2.7B-Chat",
-        torch_dtype=torch.float16, device_map="auto"
+        torch_dtype=torch.bfloat16, device_map="auto"
     )
     if model_path:
         model.load_state_dict(torch.load(model_name))
@@ -94,6 +94,7 @@ def evaluate_mcsmoe(
                     dataloader=dataloader_for_merging,
                     merge=merge,
                     mode=mode,
+                    partition=partition,
                     core_experts=dom_experts,
                     dominant_alone=False,
                     usage_weighted=False

@@ -234,9 +234,13 @@ class ExpertsGrouperForQwen2MoE(object):
                         print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
                         # Find the most unsimilar expert in the exceed group
                         sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
-                        unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
+                        print(sim, group_dict[most_similar_group_label.item()])
+                        unsimilar_pos = torch.argmin(sim).item()
+                        if (unsimilar_pos == 0): # do not let it choose the dominant expert
+                            unsimilar_pos = 1
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][unsimilar_pos]
                     
-                        group_member_count[self._group_state_dict[ffn_name][i]] -= 1
+                        group_member_count[most_similar_group_label] -= 1
                         group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
@@ -248,6 +252,7 @@ class ExpertsGrouperForQwen2MoE(object):
                         most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
                         self._group_state_dict[ffn_name][unsimilar_idx] = most_similar_group_label
                         group_member_count[most_similar_group_label] += 1
+                        group_dict[most_similar_group_label.item()].append(unsimilar_idx)
                         print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
         return dom_experts
 
@@ -400,7 +405,7 @@ class ExpertsGrouperForQwen2MoE(object):
         
         for handle in handles:
             handle.remove()
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         for layer_idx in tqdm(self.sparse_layer_indices, desc="[TAMP] Computing similarities by expert outputs..."):
             ffn_name = f"model.layers.{layer_idx}.mlp"
@@ -416,7 +421,7 @@ class ExpertsGrouperForQwen2MoE(object):
                         similarity = self.similarity_fn(i_flat, j_flat)
                         self.save_similarity(ffn_name, i, j, similarity)
         
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
     
     def all_in_one_knowledge_dominant(
             self,
@@ -519,11 +524,11 @@ class ExpertsGrouperForQwen2MoE(object):
                 del outputs, pred, kl_div
                 
                 # Measure amount of knowledge
-                routing_weights = F.softmax(router_logits[layer_idx], dim=1, dtype=torch.float)
+                routing_weights = F.softmax(router_logits[layer_idx], dim=1)
                 routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
                 router_indices.append(selected_experts)
                 if mode == "activation-with-router-logits" or mode == "all":
-                     if hasattr(model.config, "norm_topk_prob"):
+                    if hasattr(model.config, "norm_topk_prob"):
                         if model.config.norm_topk_prob:
                             routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
                     else:
@@ -604,8 +609,12 @@ class ExpertsGrouperForQwen2MoE(object):
                         # Find the most unsimilar expert in the exceed group
                         sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
                         unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
-                        
-                        group_member_count[self._group_state_dict[moe_name][i]] -= 1
+                        print(sim, group_dict[most_similar_group_label.item()])
+                        unsimilar_pos = torch.argmin(sim).item()
+                        if (unsimilar_pos == 0): # do not let it choose the dominant expert
+                            unsimilar_pos = 1
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][unsimilar_pos]
+                        group_member_count[most_similar_group_label] -= 1
                         group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
@@ -623,15 +632,16 @@ class ExpertsGrouperForQwen2MoE(object):
             # STEP: 4. Zipit Merge
             group_labels = self._group_state_dict[moe_name]
             layer_forwarded_hidden_states = tuple()
-            router_weights = torch.cat(router_weights, dim=0) # BT x k
-            router_indices = torch.cat(router_indices, dim=0) # BT x k
             forwarded_hidden_states = torch.cat(forwarded_hidden_states, dim=0) # T x D
+            cat_router_indices = torch.cat(router_indices, dim=0) # BT x k
+            if mode == "activation-with-router-logits" or mode == "all":
+                cat_router_weights = torch.cat(router_weights, dim=0) # BT x k
             for e in range(self.num_experts):
-                expert_mask = (router_indices == expert_idx)
+                expert_mask = (cat_router_indices == e)
                 batch_tensor = torch.any(expert_mask, dim=-1).to(forwarded_hidden_states.device)
                 choice_input = forwarded_hidden_states[batch_tensor]
                 if mode == "activation-with-router-logits" or mode == "all":
-                    router_weight = torch.masked_select(router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    router_weight = torch.masked_select(cat_router_weights, expert_mask).view(-1, 1).to(choice_input.device)
                     hidden_states = choice_input * router_weight
                 else:
                     hidden_states = choice_input
@@ -1469,7 +1479,7 @@ def merge_by_groups_within_and_across_models(
     dataloader: DataLoader,
     merge: str,
     mode: Optional[str] = "normal",
-    partition: Optional[int] = 2,
+    partition: Optional[int] = 1,
     dominant_alone: Optional[bool] = False,
     core_experts: Optional[Dict[str, List[int]]] = None,
     usage_weighted: Optional[bool] = False,
@@ -1509,7 +1519,7 @@ def merge_by_groups_within_and_across_models(
                 outputs = qwen_model(**batch, output_router_logits=True)
                 for layer_idx in sparse_layer_indices:
                     ffn_name = f"model.layers.{layer_idx}.mlp"
-                    routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1, dtype=torch.float)
+                    routing_weights = F.softmax(outputs.router_logits[layer_idx], dim=1)
                     routing_weights, selected_experts = torch.topk(routing_weights, qwen_model.config.num_experts_per_tok, dim=-1)
                     router_indices[ffn_name].append(selected_experts)
                     if mode == "activation-with-router-logits" or mode == "all":
@@ -1527,27 +1537,20 @@ def merge_by_groups_within_and_across_models(
             ffn_name = f"model.layers.{layer_idx}.mlp"
             group_labels = grouper.group_state_dict()[ffn_name]
             layer_forwarded_hidden_states = tuple()
+            hidden_states = torch.cat(forwarded_hidden_states[ffn_name], dim=0) # T x D
+            concat_router_indices = torch.cat(router_indices[ffn_name], dim=0) # BT x k
+            if mode == "activation-with-router-logits" or mode == "all":
+                concat_router_weights = torch.cat(router_weights[ffn_name], dim=0) # BT x k
             for expert_idx in range(num_experts): # expert num
-                hidden_states_list = []
-                for i in range(len(dataloader)): # batch of data
-                    batch_tensor = torch.tensor([False for _ in range(len(forwarded_hidden_states[ffn_name][i]))])
-                    if mode == "activation-with-router-logits" or mode == "all":
-                        router_weight = []
-                        for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-                            for r, ind in enumerate(router_indices[ffn_name][i][j]): # token's router-logits and expert-index
-                                if expert_idx == ind:
-                                    batch_tensor[j] = True
-                                    router_weight.append(router_weights[ffn_name][i][j][r])
-                        router_weight = torch.tensor(router_weight).unsqueeze(1).to(forwarded_hidden_states[ffn_name][i])
-                        hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor] * router_weight)
-                    else:
-                        for j in range(len(forwarded_hidden_states[ffn_name][i])): # one token
-                            if expert_idx in router_indices[ffn_name][i][j]:
-                                batch_tensor[j] = True
-                        hidden_states_list.append(forwarded_hidden_states[ffn_name][i][batch_tensor])
-                layer_forwarded_hidden_states += (
-                    torch.cat(hidden_states_list, dim=0),
-                )
+                expert_mask = (concat_router_indices == expert_idx)
+                batch_tensor = torch.any(expert_mask, dim=-1).to(hidden_states.device)
+                choice_input = hidden_states[batch_tensor]
+                if mode == "activation-with-router-logits" or mode == "all":
+                    router_weight = torch.masked_select(concat_router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    layer_hidden_states = choice_input * router_weight
+                else:
+                    layer_hidden_states = choice_input
+                layer_forwarded_hidden_states += (layer_hidden_states,)
             qwen_model.model.layers[layer_idx].mlp = _merge_moe_experts_within_and_across_models(
                 moe=qwen_model.model.layers[layer_idx].mlp,
                 group_labels=group_labels,
@@ -1560,7 +1563,6 @@ def merge_by_groups_within_and_across_models(
                 data_limit=grouper.data_limit,
             )
             del layer_forwarded_hidden_states
-            hidden_states_list.clear()
             print(f"------- Layer {layer_idx} took {time.time() - _st:.2f}s -------\n")
 
     print(grouper.sparse_layer_indices)

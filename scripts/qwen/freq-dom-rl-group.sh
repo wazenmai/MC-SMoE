@@ -15,7 +15,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="all" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-router-logits-group-zipit-merge-all.txt" \
@@ -32,7 +32,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="all" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-router-logits-group-fix-dom-merge-all.txt" \
@@ -48,7 +48,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="input-weight" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-router-logits-group-fix-dom-merge-input-weight.txt" \
@@ -64,7 +64,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="activation-with-router-logits" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-router-logits-group-fix-dom-merge-activation.txt" \
@@ -80,7 +80,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="normal" \
   --num_average_groups=45 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_freq-dom-router-logits-group-fix-dom-merge.txt" \
