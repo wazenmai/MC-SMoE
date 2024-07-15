@@ -10,11 +10,11 @@
 
 
 # model: AIChenKai/TinyLlama-1.1B-Chat-v1.0-x2-MoE. s3nh/TinyLLama-4x1.1B-MoE, mistralai/Mixtral-8x7B-v0.1
-# /app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841
+# /mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29512 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="frequency" \
   --similarity_base="weight" \
@@ -29,7 +29,7 @@ accelerate launch --config_file static/finetune_config.yaml \
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29512 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="frequency" \
   --similarity_base="expert-output" \
@@ -44,7 +44,7 @@ accelerate launch --config_file static/finetune_config.yaml \
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29512 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="frequency" \
   --similarity_base="weight" \
@@ -59,7 +59,7 @@ accelerate launch --config_file static/finetune_config.yaml \
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29512 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="frequency" \
   --similarity_base="expert-output" \
