@@ -1,3 +1,9 @@
+export NCCL_P2P_DISABLE=0
+export CUDA_LAUNCH_BLOCKING=1
+export TORCH_USE_CUDA_DSA=1
+export TOKENIZERS_PARALLELISM="false"
+export HF_HOME="/mnt/nfs/wazenmai/huggingface"
+
 # dominant:         random, frequency, knowledge
 # similarity_base:  weight, router-weight, router-logits, expert-output
 # merge:            no, freq, zipit, update, fix-dom, unmerge, fix-dom-same

@@ -1,3 +1,9 @@
+export NCCL_P2P_DISABLE=0
+export CUDA_LAUNCH_BLOCKING=1
+export TORCH_USE_CUDA_DSA=1
+export TOKENIZERS_PARALLELISM="false"
+export HF_HOME="/mnt/nfs/wazenmai/huggingface"
+
 # fix-dom
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29506 mcsmoe/msmoe-merging-mixtral.py \
