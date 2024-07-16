@@ -20,7 +20,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="all" \
   --num_average_groups=6 \
   --n_sentences=32 \
-  --train_batch_size=4 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_6e_kl-dom-expert-output-group-zipit-merge-all-50k.txt" \
@@ -36,7 +36,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="normal" \
   --num_average_groups=6 \
   --n_sentences=32 \
-  --train_batch_size=4 \
+  --train_batch_size=2 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_6e_kl-dom-expert-output-group-kl-weight-merge-50k.txt" \
