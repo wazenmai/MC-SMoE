@@ -41,6 +41,7 @@ def evaluate_mcsmoe(
     
     # torch.cuda.memory._record_memory_history()
     # torch.set_printoptions(threshold=1000000)
+    torch.manual_seed(0)
     
     eval_ppl = (task == "minipile")
     tokenizer = AutoTokenizer.from_pretrained(model_name)

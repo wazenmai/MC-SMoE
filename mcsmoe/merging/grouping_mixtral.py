@@ -239,14 +239,17 @@ class ExpertsGrouperForMixtral(object):
                         raise ValueError(
                             f"[Merging]The number of groups at Encoder layer {layer_idx} is too small!"
                         )
-                    
                     while group_member_count[most_similar_group_label] > self.group_limit:
                         print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
                         # Find the most unsimilar expert in the exceed group
                         sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
-                        unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
+                        print(sim, group_dict[most_similar_group_label.item()])
+                        unsimilar_pos = torch.argmin(sim).item()
+                        if (unsimilar_pos == 0): # do not let it choose the dominant expert
+                            unsimilar_pos = 1
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][unsimilar_pos]
                     
-                        group_member_count[self._group_state_dict[ffn_name][i]] -= 1
+                        group_member_count[most_similar_group_label] -= 1
                         group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
@@ -258,6 +261,7 @@ class ExpertsGrouperForMixtral(object):
                         most_similar_group_label = self._group_state_dict[ffn_name][most_similar_core]
                         self._group_state_dict[ffn_name][unsimilar_idx] = most_similar_group_label
                         group_member_count[most_similar_group_label] += 1
+                        group_dict[most_similar_group_label.item()].append(unsimilar_idx)
                         print(f"--expert {unsimilar_idx} is assigned to group {most_similar_group_label}, the core expert is {most_similar_core}")
         return dom_experts
     
@@ -1070,14 +1074,18 @@ class ExpertsGrouperForMixtral(object):
                             f"[Merging]The number of groups at Encoder layer {layer_idx} is too small!"
                         )
                     
-                    while group_membert_count[most_similar_group_label] > self.group_limit:
+                    while group_member_count[most_similar_group_label] > self.group_limit:
                         print(f"----meet group limit {self.group_limit} with group {most_similar_group_label} (core: {most_similar_core})")
                         # Find the most unsimilar expert in the exceed group
-                        sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label]]
+                        sim = similarity_matrix[most_similar_core, group_dict[most_similar_group_label.item()]]
                         unsimilar_idx = group_dict[most_similar_group_label.item()][torch.argmin(sim).item()]
+                        print(sim, group_dict[most_similar_group_label.item()])
+                        unsimilar_pos = torch.argmin(sim).item()
+                        if (unsimilar_pos == 0): # do not let it choose the dominant expert
+                            unsimilar_pos = 1
+                        unsimilar_idx = group_dict[most_similar_group_label.item()][unsimilar_pos]
+                        group_member_count[most_similar_group_label] -= 1
                         group_dict[most_similar_group_label.item()].remove(unsimilar_idx)
-                    
-                        group_member_count[self._group_state_dict[moe_name][i]] -= 1
                         similarity_matrix[unsimilar_idx, most_similar_core] = -1
                         similarity_matrix[most_similar_core, unsimilar_idx] = -1
                         print(f"----kick out {unsimilar_idx} from group ")
@@ -1095,15 +1103,16 @@ class ExpertsGrouperForMixtral(object):
             # STEP: 4. Zipit Merge
             group_labels = self._group_state_dict[moe_name]
             layer_forwarded_hidden_states = tuple()
-            router_weights = torch.cat(router_weights, dim=0) # BT x k
-            router_indices = torch.cat(router_indices, dim=0) # BT x k
             forwarded_hidden_states = torch.cat(forwarded_hidden_states, dim=0) # T x D
+            cat_router_indices = torch.cat(router_indices, dim=0) # BT x k
+            if mode == "activation-with-router-logits" or mode == "all":
+                cat_router_weights = torch.cat(router_weights, dim=0) # BT x k
             for expert_idx in range(self.num_experts): # expert num
-                expert_mask = (router_indices == expert_idx)
+                expert_mask = (cat_router_indices == expert_idx)
                 batch_tensor = torch.any(expert_mask, dim=-1).to(forwarded_hidden_states.device)
                 choice_input = forwarded_hidden_states[batch_tensor]
                 if mode == "activation-with-router-logits" or mode == "all":
-                    router_weight = torch.masked_select(router_weights, expert_mask).view(-1, 1).to(choice_input.device)
+                    router_weight = torch.masked_select(cat_router_weights, expert_mask).view(-1, 1).to(choice_input.device)
                     hidden_states = choice_input * router_weight
                 else:
                     hidden_states = choice_input
