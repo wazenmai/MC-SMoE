@@ -189,3 +189,11 @@ mcsmoe/data/c4-train.00000-of-01024.json
 temp/
 results/
 scripts/tinyllama/
+scripts/mixtral/merge1.sh
+scripts/mixtral/prune1.sh
+
+lm-evaluation-harness/
+promptsource/
+omnicli/
+transformers/
+*.txt

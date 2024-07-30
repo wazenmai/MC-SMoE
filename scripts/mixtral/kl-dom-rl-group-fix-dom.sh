@@ -1,7 +1,13 @@
+export NCCL_P2P_DISABLE=0
+export CUDA_LAUNCH_BLOCKING=1
+export TORCH_USE_CUDA_DSA=1
+export TOKENIZERS_PARALLELISM="false"
+export HF_HOME="/mnt/nfs/wazenmai/huggingface"
+
 # fix-dom
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29506 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="knowledge" \
   --similarity_base="router-logits" \
@@ -9,7 +15,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="all" \
   --num_average_groups=6 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=4 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_kl-dom-router-logits-group-fix-dom-merge-all-50k.txt" \
@@ -17,7 +23,7 @@ accelerate launch --config_file static/finetune_config.yaml \
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29506 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="knowledge" \
   --similarity_base="router-logits" \
@@ -25,7 +31,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="input-weight" \
   --num_average_groups=6 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=4 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_kl-dom-router-logits-group-fix-dom-merge-input-weight-50k.txt" \
@@ -33,7 +39,7 @@ accelerate launch --config_file static/finetune_config.yaml \
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29506 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="knowledge" \
   --similarity_base="router-logits" \
@@ -41,7 +47,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="activation-with-router-logits" \
   --num_average_groups=6 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=4 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_kl-dom-router-logits-group-fix-dom-merge-activation-50k.txt" \
@@ -49,7 +55,7 @@ accelerate launch --config_file static/finetune_config.yaml \
 
 accelerate launch --config_file static/finetune_config.yaml \
   --main_process_port 29506 mcsmoe/msmoe-merging-mixtral.py \
-  --model_name="/app/warehouse/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
+  --model_name="/mnt/nfs/wazenmai/huggingface/models--mistralai--Mixtral-8x7B-v0.1/snapshots/985aa055896a8f943d4a9f2572e6ea1341823841" \
   --task="winogrande,arc_challenge,arc_easy,boolq,hellaswag,mmlu,openbookqa,rte" \
   --dominant="knowledge" \
   --similarity_base="router-logits" \
@@ -57,7 +63,7 @@ accelerate launch --config_file static/finetune_config.yaml \
   --mode="normal" \
   --num_average_groups=6 \
   --n_sentences=32 \
-  --train_batch_size=8 \
+  --train_batch_size=4 \
   --eval_batch_size=16 \
   --partition=1 \
   --result_path="/app/results/results_kl-dom-router-logits-group-fix-dom-merge-50k.txt" \

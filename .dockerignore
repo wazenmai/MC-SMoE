@@ -1,2 +1,6 @@
 mc_env/
 wandb/
+results/
+temp/
+log_*
+*.pkl
